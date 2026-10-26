@@ -1,1 +1,15 @@
 venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# run_demo.py / check.py output (raw CSV + per-run JSON). Commit curated
+# numbers in HANDOFF.md / the report instead of raw logs.
+results/
+*_run[0-9][0-9].csv
+*_run[0-9][0-9].json
+demo_results*.csv
+demo_results*.json
+
+# Personal Claude Code settings
+.claude/settings.local.json

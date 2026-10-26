@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-CS3103 Assignment 4 - LiveRecall naive working baseline.
-
-This starter is intentionally useful but incomplete. It provides the required
-CLI and a basic WebSocket broadcaster so that caption_source.py -> server ->
-browser/load clients works on day one.
-
-It DOES NOT implement the graded networking mechanisms:
-  - revision-state management or deduplication
-  - recent-history recovery or late-join recovery
-  - bounded per-client application queues
-  - slow-client isolation
-  - semantic coalescing / backpressure
-  - constrained-bandwidth overload handling
+CS3103 Assignment 4 - LiveRecall server.
 
 Required evaluator command:
     python solution_server.py --port 8765
 
-Teams should replace or substantially extend the implementation while keeping
-this command-line interface and the protocol in the assignment specification.
+Architecture (see HANDOFF.md for the full write-up):
+
+  caption_source --SOURCE_HELLO/CAPTION_UPDATE--> handle_source
+        |  STATE.apply(): reject stale/duplicate/after-final, store, bound history
+        v
+  for every connected client: ClientChannel.offer()   (never awaits)
+        |
+        v  one sender task per client drains its own bounded queue
+  student client <--HISTORY, then live CAPTION_UPDATE--
+
+On CLIENT_HELLO, building the HISTORY snapshot and registering the client's
+channel happen with no `await` in between. asyncio only switches tasks at an
+await, so no CAPTION_UPDATE can slip between the snapshot and the
+registration: each final reaches the client exactly once (in HISTORY or live).
 """
 
 from __future__ import annotations
@@ -26,89 +26,116 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 from typing import Any
 
 import websockets
 
-# Naive global set of currently connected student clients.
-# There is deliberately no per-client queue or recovery state here.
-CLIENTS: set[Any] = set()
+from liverecall.channel import ClientChannel
+from liverecall.state import CaptionState, history_message
+
+STATE = CaptionState()
+CHANNELS: set[ClientChannel] = set()
+# Strong references to fire-and-forget tasks so they are not garbage-collected.
+_BACKGROUND: set[asyncio.Task] = set()
+
+STATS_INTERVAL_S = 10.0
 
 
-async def broadcast_naively(raw_message: str) -> None:
-    """Send one message directly to every connected client.
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
 
-    This is intentionally a naive baseline. The source handler waits for all
-    sends to complete. Under pressure, this design may accumulate delay and is
-    not the target architecture for the assignment.
-    """
-    if not CLIENTS:
-        return
 
-    snapshot = list(CLIENTS)
-    results = await asyncio.gather(
-        *(client.send(raw_message) for client in snapshot),
-        return_exceptions=True,
-    )
-    for client, result in zip(snapshot, results):
-        if isinstance(result, Exception):
-            CLIENTS.discard(client)
+def broadcast(caption) -> None:
+    for channel in list(CHANNELS):
+        channel.offer(caption)
 
 
 async def handle_source(ws, hello: dict[str, Any]) -> None:
-    session = hello.get("session")
-    print(f"source connected: session={session}", flush=True)
-
+    print(f"source connected: session={hello.get('session')}", flush=True)
     try:
         async for raw in ws:
             try:
                 msg = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(msg, dict):
                 continue
 
             msg_type = msg.get("type")
             if msg_type == "CAPTION_UPDATE":
-                # Baseline behavior: forward exactly what was received.
-                # No history, state, validation, coalescing, or bounded queues.
-                await broadcast_naively(raw)
+                caption = STATE.apply(msg)
+                if caption is not None:
+                    broadcast(caption)
             elif msg_type == "SOURCE_DONE":
-                # Test-control message. The specification does not require it
-                # to be forwarded to clients.
+                # Test-control message; not forwarded to clients.
                 print("source finished", flush=True)
-            else:
-                # Forward compatibility: ignore fields/messages this baseline
-                # doesn't understand rather than crashing.
-                continue
+            # Anything else is ignored for forward compatibility.
+    except websockets.exceptions.ConnectionClosed:
+        pass
     finally:
         print("source disconnected", flush=True)
 
 
+def _int_field(hello: dict[str, Any], key: str) -> int:
+    value = hello.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))
+
+
 async def handle_client(ws, hello: dict[str, Any]) -> None:
     client_id = hello.get("client_id")
+    last_segment = _int_field(hello, "last_segment")
+    last_revision = _int_field(hello, "last_revision")
 
-    # The baseline has no stored recovery state. Sending an empty HISTORY makes
-    # the connection behavior visible and keeps the starter easy to inspect.
-    # Students must implement correct HISTORY semantics for the assignment.
-    await ws.send(json.dumps({"type": "HISTORY", "items": []}))
+    def on_overflow(channel: ClientChannel) -> None:
+        # Too far behind with only finals queued: drop the connection. The
+        # client reconnects with its finalized state and recovers via HISTORY.
+        CHANNELS.discard(channel)
+        print(f"client overflow, closing: id={client_id}", flush=True)
+        _spawn(ws.close(code=1013, reason="client too far behind; reconnect to resume"))
 
-    CLIENTS.add(ws)
-    print(f"client connected: id={client_id}; clients={len(CLIENTS)}", flush=True)
+    channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow)
+
+    # --- atomic section: no await between snapshot and registration ---------
+    items = STATE.history_for(last_segment, last_revision, hello.get("history_seconds"))
+    channel.offer_control(history_message(items))
+    CHANNELS.add(channel)
+    # ------------------------------------------------------------------------
+
+    sender = asyncio.create_task(channel.run())
+    print(
+        f"client connected: id={client_id} resume=({last_segment},{last_revision}) "
+        f"history_items={len(items)} clients={len(CHANNELS)}",
+        flush=True,
+    )
     try:
-        # Student clients normally don't send further messages after hello.
-        # Keep the WebSocket open until the client disconnects.
+        # Clients don't need to send anything after CLIENT_HELLO; keep reading
+        # so we notice the close.
         async for _ in ws:
             pass
+    except websockets.exceptions.ConnectionClosed:
+        pass
     finally:
-        CLIENTS.discard(ws)
-        print(f"client disconnected: id={client_id}; clients={len(CLIENTS)}", flush=True)
+        CHANNELS.discard(channel)
+        channel.close()
+        sender.cancel()
+        print(f"client disconnected: id={client_id}; clients={len(CHANNELS)}", flush=True)
 
 
 async def handler(ws) -> None:
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=5)
         hello = json.loads(raw)
-    except (asyncio.TimeoutError, json.JSONDecodeError):
+        if not isinstance(hello, dict):
+            raise ValueError("hello must be a JSON object")
+    except (asyncio.TimeoutError, ValueError, TypeError):
         await ws.close(code=1008, reason="Expected a valid hello message")
+        return
+    except websockets.exceptions.ConnectionClosed:
         return
 
     msg_type = hello.get("type")
@@ -120,6 +147,20 @@ async def handler(ws) -> None:
         await ws.close(code=1008, reason="Expected SOURCE_HELLO or CLIENT_HELLO")
 
 
+async def report_stats() -> None:
+    """Periodic one-line summary; useful when watching memory/queue bounds."""
+    while True:
+        await asyncio.sleep(STATS_INTERVAL_S)
+        pending = [c.pending for c in CHANNELS]
+        print(
+            f"[stats {time.strftime('%H:%M:%S')}] clients={len(CHANNELS)} "
+            f"history={STATE.history_len} active={STATE.active_len} "
+            f"max_pending={max(pending, default=0)} "
+            f"dropped={sum(c.dropped for c in CHANNELS)}",
+            flush=True,
+        )
+
+
 async def main_async(port: int) -> None:
     async with websockets.serve(
         handler,
@@ -129,7 +170,8 @@ async def main_async(port: int) -> None:
         ping_interval=20,
         ping_timeout=20,
     ):
-        print(f"LiveRecall baseline listening on ws://0.0.0.0:{port}", flush=True)
+        print(f"LiveRecall server listening on ws://0.0.0.0:{port}", flush=True)
+        _spawn(report_stats())
         await asyncio.Future()
 
 
