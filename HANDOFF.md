@@ -12,6 +12,19 @@ Latest state of the relay. Read `CLAUDE.md` first for the plan and rules; this f
 
 > ⚠️ **Read "Test environments" below before trusting any numbers you produce.** VirtualBox on a PC with Hyper-V on gives garbage results.
 
+### Numbers today (median of 3)
+
+Public-test commands from `PUBLIC_TESTS.md` (`--runs 3`). Environment: WSL2 Ubuntu 24.04 with timer drift +1%, so these are dev numbers, not the reference Mininet VM. Dup/stale were 0 in all 12 runs.
+
+```
+- T1 (20 clients, 20 s):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients, 40 s):  P50 6.3 ms, P95 23.3 ms, P99 33.2 ms, completeness 100%
+- T3 (10% slow, 60 s):     normal P95 21.4 ms, slow P95 28086 ms, completeness 95.1%   <- Day 2
+- T4 (20% drop 5 s, 60 s): dup 0, stale 0, completeness 100%, recovery P50 2.3 ms (P95 2.8 ms)
+```
+
+Compared with the naive starter: T4 completeness 98.2% → **100%** (correct HISTORY recovery). T3 is unchanged (95.1%) because slow-reader backpressure is Day 2's work.
+
 **Biggest open item for Day 2: T3 slow readers still lose ~half their finals (95.1% completeness overall).** The cause and a suggested direction are under "Interface for Day 2" below. When you fix it, set `"gated": True` for t3 in `check.py`.
 
 ### How to run
@@ -90,7 +103,7 @@ python3 -c "import check; print(f'{check.timer_drift():+.0%}')"
 
 **What we used instead:** WSL2 Ubuntu 24.04 (Python 3.12, kernel 6.6.87.2-microsoft-standard-WSL2, real `sch_netem`/`sch_tbf` modules, `tc` run as root via `wsl -u root`). Its timers are accurate, so its **correctness numbers (completeness, dup, stale) and relative comparisons are trustworthy**. But WSL2 is *not* the spec's reference environment ("use a full Ubuntu VM"), so its absolute latencies are **dev numbers only**.
 
-**For the report (Day 4):** produce the final T1–T5 tables on a **full Ubuntu VM or native Ubuntu** where `check.py` reports timer drift < 10%: a teammate's machine, a Mac with Multipass, or a Windows PC with Hyper-V off. (lihloway's laptop is Windows 11 Home with Hyper-V held on by WSL2 + Core isolation, so it can't host a valid VM without disabling those.) If no full VM is available, use WSL2 and say so explicitly in the report.
+**Team decision — reference environment: the CS3103 Mininet lab Ubuntu VM.** The spec explicitly allows reusing it, so the report's final T1–T5 tables should come from the Mininet VM. Condition: run it on a machine where `check.py` reports **timer drift < 10%** (no Hyper-V underneath, or VT-x available to the hypervisor). lihloway's laptop can't host it validly: Windows 11 Home with Hyper-V held on by WSL2 + Core isolation. So whoever runs Day 4 should use the Mininet VM on their own machine, or a teammate's, after checking drift. If no valid Mininet VM is available, fall back to WSL2 and say so explicitly in the report.
 
 ### Results — Ubuntu (WSL2 Ubuntu 24.04, 16 vCPU, timer drift +0%, 1 run each, dev numbers)
 

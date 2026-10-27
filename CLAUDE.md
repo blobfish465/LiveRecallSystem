@@ -51,7 +51,7 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 | 4 | TBD | Ubuntu VM + tc/netem; T1–T5 × 3 runs (median); bandwidth + stress + 5-min memory runs; before/after comparison; charts; README; report draft | Results + charts committed; README reproducible from a fresh clone |
 | Meet-up | All | Integration fixes, demo video (5–7 min), `AI_USAGE.md`, `CONTRIBUTIONS.md`, final report, `submission_check.py --final`, viva walkthrough of each other's code | Submitted |
 
-Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — WSL is not the reference environment. Suggested: `multipass launch --name liverecall --cpus 2 --memory 4G --disk 15G`.
+Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — WSL is not the reference environment. **Team decision: the reference environment is the CS3103 Mininet lab Ubuntu VM** (allowed by the spec); the report's final tables come from it. If you don't have it, a fresh Ubuntu VM (e.g. `multipass launch --name liverecall --cpus 2 --memory 4G --disk 15G`) is the next best option.
 
 **Before trusting any numbers, check `check.py`'s `asyncio timer drift` line (must be < 10%).** VirtualBox/Multipass on a Windows PC with Hyper-V on (WSL2, Docker, Core isolation) runs in "NEM" mode with timers 100–200% late, which makes every metric meaningless (see "Test environments" in `HANDOFF.md`). WSL2 is accurate and fine for development; the report's final tables should come from a full Ubuntu VM with valid timers, or be labelled WSL2.
 
