@@ -51,13 +51,18 @@ async def hello(ws, last_seg=0, last_rev=0, history_seconds=60):
 async def collect(ws, until_final, timeout=5.0):
     """Receive messages until the final of segment `until_final` arrives."""
     msgs = []
-    async with asyncio.timeout(timeout):
+
+    async def loop():
         while True:
             msg = json.loads(await ws.recv())
             msgs.append(msg)
             items = msg["items"] if msg["type"] == "HISTORY" else [msg]
             if any(i["segment"] == until_final and i["final"] for i in items):
                 return msgs
+
+    # wait_for rather than asyncio.timeout: the latter needs Python 3.11 and
+    # Ubuntu 22.04 ships 3.10.
+    return await asyncio.wait_for(loop(), timeout)
 
 
 def finals_seen(msgs):
@@ -70,9 +75,11 @@ def finals_seen(msgs):
 
 
 async def wait_for_state(predicate, timeout=2.0):
-    async with asyncio.timeout(timeout):
+    async def loop():
         while not predicate():
             await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(loop(), timeout)
 
 
 def test_late_join_gets_history_then_live():

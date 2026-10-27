@@ -30,6 +30,8 @@ python check.py --full     # PUBLIC_TESTS.md durations
 python check.py --only t3  # one scenario
 ```
 
+`check.py` first prints `asyncio timer drift`. If it warns (> +10%), **stop**: this machine's timers are unreliable (typically VirtualBox on a Hyper-V host) and every metric will be wrong. See "Test environments" in `HANDOFF.md`.
+
 Gates for every scenario: final completeness 100%, duplicates 0, stale 0, non-final HISTORY items 0, connection errors 0. T1/T2 also need Normal Update Coverage ≥ 99%.
 
 | Scenario | Quick params | Added by |

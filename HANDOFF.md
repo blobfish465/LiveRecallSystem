@@ -8,7 +8,9 @@ Latest state of the relay. Read `CLAUDE.md` first for the plan and rules; this f
 
 ### Status: DONE
 
-`pytest` (42 tests) and `python check.py` (quick gate: t1, t2, t4, late gated; t3 report-only) pass. `submission_check.py` passes.
+`pytest` (42 tests) and `python check.py` (quick gate: t1, t2, t4, late gated; t3 report-only) pass on **Windows 11** and **WSL2 Ubuntu 24.04**; pytest also passes on a real **Ubuntu 22.04 VM (Python 3.10)**. `submission_check.py` passes on all three.
+
+> ⚠️ **Read "Test environments" below before trusting any numbers you produce.** VirtualBox on a PC with Hyper-V on gives garbage results.
 
 **Biggest open item for Day 2: T3 slow readers still lose ~half their finals (95.1% completeness overall).** The cause and a suggested direction are under "Interface for Day 2" below. When you fix it, set `"gated": True` for t3 in `check.py`.
 
@@ -69,7 +71,54 @@ So Day 2 needs a **lag signal that doesn't depend on buffers filling**, and must
 - `websockets` enables **permessage-deflate** by default: costs CPU per client per message, but saves bandwidth. Worth testing both under the bandwidth profile.
 - Keep a `--naive` / no-coalesce switch for the required before/after comparison. The naive starter's numbers are below already.
 
-### Results (Windows 11 laptop, loopback, 1 run each — not the report numbers)
+### Test environments — read before trusting numbers
+
+**⚠️ VirtualBox + Hyper-V gives invalid timing.** On Windows with Hyper-V active (WSL2 installed, Docker, or Core isolation → *Memory integrity* / *Kernel-mode hardware-enforced stack protection* on), VirtualBox can't get VT-x and silently falls back to "NEM" mode on top of Hyper-V. `VBox.log` then contains `HM: HMR3Init: Attempting fall back to NEM: VT-x is not available`. In that mode the VM's clock is right but **asyncio timers fire 13–240% late** (we measured `10 × sleep(0.1)` taking up to 3.4 s). The caption source, load clients and server are all paced by asyncio timers, so the source falls behind the clients' fixed test window and finals "go missing":
+
+| Ubuntu 22.04 VirtualBox VM, NEM mode | Final % |
+|---|---:|
+| Our server, plain T1 (no impairment) | 68.8 |
+| Original naive starter, plain T1 | 56.3 |
+
+Both should be 100% (they are on Windows and WSL2), so this is the VM, not the code. **Don't debug the server against numbers from such a VM.**
+
+**Check any machine first:** `check.py` now prints `asyncio timer drift` before running and warns above +10%. Measured: Windows +2%, WSL2 +0%, VirtualBox-on-Hyper-V **+134% to +240%**. Quick manual check from the repo root (prints the overrun fraction; should be close to 0):
+
+```bash
+python3 -c "import check; print(f'{check.timer_drift():+.0%}')"
+```
+
+**What we used instead:** WSL2 Ubuntu 24.04 (Python 3.12, kernel 6.6.87.2-microsoft-standard-WSL2, real `sch_netem`/`sch_tbf` modules, `tc` run as root via `wsl -u root`). Its timers are accurate, so its **correctness numbers (completeness, dup, stale) and relative comparisons are trustworthy**. But WSL2 is *not* the spec's reference environment ("use a full Ubuntu VM"), so its absolute latencies are **dev numbers only**.
+
+**For the report (Day 4):** produce the final T1–T5 tables on a **full Ubuntu VM or native Ubuntu** where `check.py` reports timer drift < 10%: a teammate's machine, a Mac with Multipass, or a Windows PC with Hyper-V off. (lihloway's laptop is Windows 11 Home with Hyper-V held on by WSL2 + Core isolation, so it can't host a valid VM without disabling those.) If no full VM is available, use WSL2 and say so explicitly in the report.
+
+### Results — Ubuntu (WSL2 Ubuntu 24.04, 16 vCPU, timer drift +0%, 1 run each, dev numbers)
+
+Quick gate (`python check.py`):
+
+| Scenario | Gate | Final % | Coverage % | P50 ms | P95 ms | P99 ms | Dup | Stale | Recovery P95 ms |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| t1 20c/15s | PASS | 100.0 | 100.0 | 1.2 | 1.6 | 2.0 | 0 | 0 | – |
+| t2 100c/25s | PASS | 100.0 | 100.0 | 3.3 | 4.7 | 5.2 | 0 | 0 | – |
+| t3 100c/40s, 10% slow | info | 95.3 | 95.3 | 4.0 | 1803 | 15781 | 0 | 0 | – |
+| t4 100c/30s, 20% disc 5 s | PASS | 100.0 | 96.3* | 3.3 | 11.6 | 21.5 | 0 | 0 | 11.7 |
+| late 100c/25s, 20% late 8 s | PASS | 100.0 | 93.3* | 3.8 | 8.0 | 10.6 | 0 | 0 | 0.7 |
+
+t3 detail: normal-client P95 16.6 ms (isolated ✓), slow-client P95 18.6 s, slow fresh 2.6% ✗.
+
+Network profiles on `lo` (`network_profiles/*.sh`, 100 clients, 40 s, reset afterwards):
+
+| Profile | Final % | Coverage % | Dup/Stale | P50 ms | P95 ms | P99 ms | Fresh ≤500 ms | Fresh final ≤500 ms |
+|---|---:|---:|---|---:|---:|---:|---:|---:|
+| T5 `delay_loss.sh` (120±30 ms, 3% loss) | 100.0 | 99.95 | 0/0 | 260 | 823 | 1170 | 85.3% | 84.6% |
+| T2 under `bandwidth_2mbit.sh` | 100.0 | 100.0 | 0/0 | 11.8 | 33.8 | 37.5 | 100% | 100% |
+
+- T5: loss shows up as **tail latency** (TCP retransmission + head-of-line blocking), not lost captions: completeness stays 100%. Good material for the report's T5 explanation.
+- **2 Mbit/s doesn't constrain 100 clients**: the stream is only ~4 msg/s × ~200 B × 100 clients ≈ 0.6 Mbit/s. Day 2/3: the bandwidth challenge needs ~300+ clients (or a lower rate) before it bites.
+
+Naive starter, T3 on WSL2 (100c/60s, 10% slow) — Ubuntu "before" number for Day 2: final 95.1%, coverage 95.2%, P95 2253 ms, P99 24046 ms; normal P95 23 ms; **slow P50 14.7 s, P95 28.1 s, fresh 1.7%**.
+
+### Results — Windows 11 laptop (loopback, 1 run each, dev numbers)
 
 Quick gate (`python check.py`) with the Day 1 server:
 
@@ -95,8 +144,9 @@ Naive starter server ("before" baseline, same harness, default public durations)
 ### Known issues / not done
 
 - Slow-client freshness is not handled yet (Day 2).
-- No bandwidth-profile, stress (>100 clients) or long-run memory runs yet (Days 2–4; see `TESTING.md`).
-- All numbers so far are from Windows, not Ubuntu.
+- No stress (>100 clients) or long-run memory runs yet (Days 2–4; see `TESTING.md`). Bandwidth profile run once, but 100 clients don't saturate 2 Mbit/s.
+- No numbers yet from a full Ubuntu VM with valid timers (see "Test environments"). Ubuntu numbers above are WSL2.
+- Line endings: `.gitattributes` now forces LF for `*.sh`. If you copy the repo from a Windows checkout made *before* this commit, run `sed -i 's/\r$//' network_profiles/*.sh` or bash will fail.
 
 ### Report notes (architecture & recovery sections)
 

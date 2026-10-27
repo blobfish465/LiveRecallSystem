@@ -76,6 +76,27 @@ SCENARIOS: dict[str, dict] = {
 }
 
 COVERAGE_MIN_PCT = 99.0
+TIMER_DRIFT_WARN = 0.10
+
+
+def timer_drift() -> float:
+    """Fraction by which asyncio sleeps overrun on this machine.
+
+    The source, load clients and server are all paced by asyncio timers. On
+    VirtualBox running on top of Hyper-V ("NEM" mode, e.g. Windows with WSL2 or
+    Docker installed) timers fire 13-200% late, the source falls behind the
+    clients' fixed test window, and every metric becomes meaningless.
+    """
+    import asyncio
+    import time
+
+    async def measure() -> float:
+        start = time.monotonic()
+        for _ in range(10):
+            await asyncio.sleep(0.1)
+        return time.monotonic() - start
+
+    return asyncio.run(measure()) / 1.0 - 1.0
 
 
 def gate(name: str, s: dict, want_coverage: bool) -> list[str]:
@@ -113,6 +134,13 @@ def main() -> int:
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         p.error(f"unknown scenario(s): {unknown}")
+
+    drift = timer_drift()
+    print(f"asyncio timer drift: {drift:+.0%}", flush=True)
+    if drift > TIMER_DRIFT_WARN:
+        print("WARNING: timers on this machine are unreliable (e.g. VirtualBox on "
+              "Hyper-V). Results below will not be meaningful; see HANDOFF.md.",
+              flush=True)
 
     RESULTS.mkdir(exist_ok=True)
     failures: list[str] = []
