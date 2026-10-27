@@ -12,6 +12,29 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 - Deadline: **4 Nov 2026**. Demo + individual viva: **6 Nov 2026** (15-min slot, book on the SharePoint sheet).
 - Spec: `miniProject_Assignment4_LiveRecall_System.pdf` (course site). Starter docs: `START_HERE.md`, `PROTOCOL_EXAMPLES.md`, `NETWORKING_PRIMER.md`, `PUBLIC_TESTS.md`.
 
+## Code map
+
+| Path | What |
+|---|---|
+| `solution_server.py` | Entry point + WebSocket wiring only (source handler, client handler, `[stats]` line every 10 s) |
+| `liverecall/state.py` | `CaptionState`: revision rules, bounded history, `history_for()` → HISTORY selection. Pure logic, no I/O |
+| `liverecall/channel.py` | `ClientChannel`: per-client bounded queue + sender task. **Backpressure/overload policy goes here** |
+| `tests/` | pytest: `test_state.py`, `test_channel.py`, `test_server.py` (real sockets, in-process) |
+| `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first |
+| `HANDOFF.md` / `TESTING.md` | Latest state + numbers / what's tested and how |
+| `results/` | Harness output (gitignored) |
+
+## Quick start
+
+```bash
+python3 -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
+pip install -r requirements-dev.txt
+python -m pytest -q          # ~1 s
+python check.py              # ~3 min; must print "GATE PASSED" and timer drift < 10%
+```
+
+`tc` needs root. In WSL2 use `wsl -d Ubuntu -u root`; in a VM use `sudo`. Always run `network_profiles/reset.sh lo` after an impairment run.
+
 ## Hard constraints (do not break)
 
 - Entry point stays `python solution_server.py --port <int>`; bind `0.0.0.0`; ready < 10 s; no interactive input.
@@ -22,6 +45,8 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 - Server must ignore unknown fields and `SOURCE_DONE`, and survive malformed JSON / clients dropping mid-send.
 - Do not assume exactly 3 revisions per segment (public source does; hidden one may not).
 - Boundedness is graded as correctness: no unbounded history, per-client queue, or memory growth.
+- **Python 3.10 compatible** (Ubuntu 22.04's default; the grader may use it). Don't use 3.11+ features: `asyncio.timeout`, `asyncio.TaskGroup`, `ExceptionGroup`/`except*`, `tomllib`, `typing.Self`. Use `asyncio.wait_for` / `gather` instead.
+- Shell scripts must stay LF (`.gitattributes` enforces it). If copying from an old Windows checkout, run `sed -i 's/\r$//' network_profiles/*.sh`.
 
 ## Protocol (field names are fixed)
 
@@ -38,14 +63,14 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 - **Snapshot history + register client for live updates with no `await` in between** (atomic in asyncio) — otherwise finals get duplicated or lost across HISTORY/live.
 - **Server history**: deque of finals bounded by time (e.g. 90 s) **and** a max count.
 - **Overload policy**: under real lag only, coalesce provisional revisions per segment (keep newest); **never drop finals**; send the newest revision with its own `source_ts`. When the client catches up, return to full-update delivery (Normal Update Coverage is graded).
-- Watch for backlog hiding in the `websockets` write buffer / kernel socket buffer — a bounded app queue alone may not bound latency.
+- **Confirmed on Day 1:** for slow readers the backlog sits in the `websockets` receive queue and TCP buffers, *not* in our queue (`max_pending` stays 0 during T3). A bounded app queue alone can't fix slow-client freshness; we need a lag signal plus a cap on in-flight messages. See "Key finding" in `HANDOFF.md`.
 - Keep state/channel logic in plain classes that don't touch real sockets, so they are unit-testable.
 
 ## Relay plan (one person per day, then a team meet-up)
 
 | Day | Owner | Work | Definition of done |
 |---|---|---|---|
-| 1 | lihloway | Repo hygiene, server state + bounded history, `HISTORY`/resume/late join, `ClientChannel` skeleton (bounded, never drops finals), `tests/` + `check.py` + `TESTING.md` stubs, naive-baseline numbers | `submission_check.py` passes; T1/T2/T4/late-join: 100% final completeness, 0 duplicates, 0 stale; `HANDOFF.md` written |
+| 1 ✅ | lihloway | **DONE.** Repo hygiene, server state + bounded history, `HISTORY`/resume/late join, `ClientChannel` skeleton (bounded, never drops finals), `tests/` + `check.py` + `TESTING.md` stubs, naive-baseline numbers | `submission_check.py` passes; T1/T2/T4/late-join: 100% final completeness, 0 duplicates, 0 stale; `HANDOFF.md` written |
 | 2 | TBD | **Backpressure**: lag detection, provisional coalescing, constrained-bandwidth policy, `--naive` flag for before/after, channel unit tests, T3 gate. Start with the "Key finding" in `HANDOFF.md` (backlog sits in socket buffers, not our queue) | T3 gated in `check.py`: normal clients fresh, slow clients 100% finals, memory flat; earlier gates still green |
 | 3 | TBD | **Browser client** (in-place revisions, provisional/final styling, ≥60 s local history, recall 30 s default + 15/30/60, auto-reconnect with finalized resume state, HISTORY dedup, configurable WS URL via query string) + **test tooling** (slow-then-fast convergence client, `check.py --stress` with 300–500 clients, bandwidth-test script). Finish any leftover Day 2 work | Manual browser checklist ticked; new tools run; earlier gates green |
 | 4 | TBD | Ubuntu VM + tc/netem; T1–T5 × 3 runs (median); bandwidth + stress + 5-min memory runs; before/after comparison; charts; README; report draft | Results + charts committed; README reproducible from a fresh clone |
@@ -63,17 +88,31 @@ Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — W
 4. Required thresholds for every gate scenario: final completeness 100%, duplicates 0, stale 0; coverage ≈100% when no clients are slow/disconnected.
 
 Coverage checklist (spec gaps that public tests don't exercise — make sure each has an owner and a test):
-- [ ] Constrained bandwidth (`network_profiles/bandwidth_2mbit.sh`)
-- [ ] Scale beyond 100 clients
-- [ ] Bursty / faster revisions and variable revision counts (1, 8, …)
-- [ ] Rapid convergence after overload ends (slow-then-fast client)
-- [ ] Long-run boundedness (5-min run with `monitor_server.py`)
-- [ ] Robustness: unknown fields, `SOURCE_DONE`, malformed JSON, mid-send disconnect
-- [ ] Browser: "What did I miss?" uses local state only; connection state visible; works when browser and server are on different hosts
+- [ ] Constrained bandwidth (`network_profiles/bandwidth_2mbit.sh`). Ran once on Day 1: **100 clients don't saturate 2 Mbit/s** (stream ≈ 0.6 Mbit/s), so use ~300+ clients or a lower rate. Day 2/3
+- [ ] Scale beyond 100 clients: `check.py --stress`. Day 3
+- [~] Bursty / faster revisions and variable revision counts: 1/2/3/8 revisions unit-tested (Day 1); bursty source rate still untested
+- [ ] Rapid convergence after overload ends (slow-then-fast client). Day 3
+- [~] Long-run boundedness: 1-hour simulation unit-tested for server history (Day 1); 5-min real run with `monitor_server.py` still needed. Day 4
+- [x] Robustness: unknown fields, `SOURCE_DONE`, malformed JSON, bad hello, abrupt client drop (`tests/test_server.py`, Day 1)
+- [ ] Browser: "What did I miss?" uses local state only; connection state visible; works when browser and server are on different hosts. Day 3
 
 ## Handoff + documentation rules
 
-- At the end of your day, update **`HANDOFF.md`**: what's done, how to run it, design decisions + why, interfaces the next person builds on, known issues, test results (numbers), and notes for your report section.
+- At the end of your day, add your section to **`HANDOFF.md`**: what's done, how to run it, design decisions + why, interfaces the next person builds on, known issues, notes for your report section, and a **"Numbers today (median of 3)"** block from the public tests (`run_demo.py ... --runs 3`, copy the medians). Use this format:
+
+  ```
+  ## Day N — <name>
+  Done: ...
+  Not done / known bugs: ...
+  Decisions made (and why): ...
+  Numbers today (median of 3), environment + timer drift:
+  - T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+  - T2 (100 clients):  P50 .. ms, P95 .. ms, P99 .. ms, completeness ..%
+  - T3 (10% slow):     normal P95 .. ms, slow P95 .. ms, completeness ..%
+  - T4 (20% drop 5s):  dup 0, stale 0, completeness ..%, recovery P50 .. ms
+  Next person should start with: ...
+  Claude suggestion I rejected (if applicable): ...   <- also goes in AI_USAGE.md
+  ```
 - Keep an **AI usage log** as you go in `AI_USAGE.md` (tool, what for, one useful suggestion, and at least one suggestion that was wrong/inefficient and how you changed it). The spec requires this; it's lost if not recorded daily.
 - Commit often under your own name (git history supports `CONTRIBUTIONS.md` and the viva). Don't commit `venv/`, `__pycache__/`, or bulky raw CSVs.
 
@@ -83,6 +122,8 @@ Coverage checklist (spec gaps that public tests don't exercise — make sure eac
 - Prefer small, reviewable changes; run `pytest` and `python check.py` after server changes.
 - Don't change the protocol's required fields or the CLI. Don't edit instructor harness files.
 - When a choice affects another day's work (e.g. the `ClientChannel` interface), note it in `HANDOFF.md`.
+- If results look surprisingly bad, first check the environment: timer drift in `check.py`'s first line, and whether the naive starter (`git show e131719:solution_server.py`) scores the same. Don't debug the server against numbers from a broken environment.
+- Report numbers honestly: say which environment (WSL2 / Mininet VM / Windows) and whether it's 1 run or the median of 3.
 
 ## Grading reminders
 
