@@ -167,6 +167,10 @@ async def main_async(port: int) -> None:
         "0.0.0.0",
         port,
         max_size=2**20,
+        # Default 32 KiB. Smaller makes send() block sooner on a congested link,
+        # so the backlog stays in our outbox, where it can be coalesced, instead
+        # of in the socket's write buffer, where it can't.
+        write_limit=4096,
         ping_interval=20,
         ping_timeout=20,
     ):
