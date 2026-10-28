@@ -1,6 +1,9 @@
 import asyncio
 import json
 
+import pytest
+
+import liverecall.channel as channel_mod
 from liverecall.channel import ClientChannel
 from liverecall.state import make_caption
 
@@ -325,5 +328,149 @@ def test_lag_with_only_provisionals_blocks_and_close_is_prompt():
         assert len(rec.sent) == count == 1 and queued(ch) == [(2, 1)]
         ch.close()
         await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(main())
+
+
+def resolve_all(ping):
+    for f in ping.futures:
+        if not f.done():
+            f.set_result(None)
+
+
+async def until(cond, timeout=3.0):
+    end = asyncio.get_running_loop().time() + timeout
+    while not cond():
+        assert asyncio.get_running_loop().time() < end, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+async def enter_lag(ch, ping, seg):
+    """Send (seg,1), let its pong go overdue, then wake the sender with (seg+1,1)."""
+    ch.offer(cap(seg, 1))
+    await settle()
+    await asyncio.sleep(0.1)
+    ch.offer(cap(seg + 1, 1))
+    await settle()
+    assert ch.lagging
+
+
+async def recover(ch, ping):
+    ping.auto = True
+    resolve_all(ping)
+    await until(lambda: not ch.lagging)
+
+
+def test_recovers_to_full_delivery_after_pongs_turn_fast():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert ch.lag_exits == 0
+        await recover(ch, ping)
+        assert not ch.coalescing and ch.lag_exits == 1 and ch.lag_entries == 1
+        for rev in (1, 2, 3):
+            ch.offer(cap(3, rev, rev == 3))
+        await until(lambda: ch.pending == 0)
+        await settle()
+        assert keys(rec.sent) == [(1, 1), (2, 1), (3, 1), (3, 2), (3, 3)]
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_no_stale_revision_across_lag_entry_and_exit():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)
+        # Queued before the sender notices the overdue pong (compacted on entry).
+        for c in [cap(2, 1), cap(2, 2), cap(2, 3, True), cap(4, 1), cap(4, 2)]:
+            ch.offer(c)
+        await settle()
+        assert ch.lagging
+        for c in [cap(5, 1), cap(5, 2), cap(4, 3)]:  # coalesced in place
+            ch.offer(c)
+        await recover(ch, ping)
+        for c in [cap(5, 3, True), cap(4, 4, True), cap(6, 1), cap(6, 2), cap(6, 3, True)]:
+            ch.offer(c)
+        await until(lambda: ch.pending == 0)
+        await settle()
+        newest: dict[int, int] = {}
+        for seg, rev in keys(rec.sent):
+            assert rev > newest.get(seg, 0), (seg, rev, keys(rec.sent))
+            newest[seg] = rev
+        assert newest[2] == 3 and newest[4] == 4 and newest[5] == 3 and newest[6] == 3
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_relapse_doubles_recover_wait_up_to_cap(monkeypatch):
+    monkeypatch.setattr(channel_mod, "RECOVER_MAX_S", 0.3)
+
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert ch._recover_s == 0.1
+        await recover(ch, ping)
+        for seg, want in [(3, 0.2), (5, 0.3)]:
+            ping.auto = False
+            await enter_lag(ch, ping, seg)
+            assert ch._recover_s == pytest.approx(want)
+            await recover(ch, ping)
+        assert ch.lag_exits == 3
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_long_calm_period_resets_recover_wait(monkeypatch):
+    monkeypatch.setattr(channel_mod, "REARM_S", 0.0)
+
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        await recover(ch, ping)
+        ping.auto = False
+        await enter_lag(ch, ping, 3)
+        assert ch._recover_s == 0.1
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_late_pong_in_lag_resets_calm_timer():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.5)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        ping.futures[0].set_result(None)  # the late pong that caused lag
+        await settle()
+        assert ch._calm_since is None
+        await until(lambda: len(ping.futures) == 2)
+        ping.futures[1].set_result(None)  # probe answered at once
+        await settle()
+        assert ch._calm_since is not None
+        await until(lambda: len(ping.futures) == 3)
+        await asyncio.sleep(0.1)  # next probe answered late
+        ping.futures[2].set_result(None)
+        await settle()
+        assert ch._calm_since is None and ch.lagging and ch.lag_exits == 0
+        ch.close()
+        await task
 
     asyncio.run(main())

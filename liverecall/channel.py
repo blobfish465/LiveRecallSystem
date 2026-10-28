@@ -27,7 +27,16 @@ is full, so a pong later than `lag_s` means "this client hasn't processed what w
 sent". After each send we keep one ping outstanding; if its pong is overdue the
 channel enters lag mode: coalescing turns on and only finals / control messages
 are sent, stop-and-wait (one send, then wait for its pong). Provisionals stay
-queued and keep being coalesced. Lag mode is sticky for now (no recovery yet).
+queued and keep being coalesced.
+
+Recovery (Day 2): the server cannot see the client's read-ahead, so "caught up"
+is only confirmed by trying full delivery. In lag mode, with nothing to send, a
+probe ping goes out every `lag_s`; once pongs have all been fast for
+`recover_s` and no final/control message is queued, lag mode ends (coalescing
+off; the queue then holds at most the newest provisional per segment, so nothing
+stale is sent). If the client is still slow it refills and lags again; entering
+lag within REARM_S of leaving doubles the next wait (up to RECOVER_MAX_S) so a
+still-slow client is not re-flooded. A longer calm period resets the wait.
 """
 
 from __future__ import annotations
@@ -43,6 +52,15 @@ DEFAULT_MAX_PENDING = 256
 # A pong later than this means the client stopped reading; loopback RTT is ~ms and
 # the T5 profile adds ~0.25 s RTT, so 1 s avoids false positives.
 LAG_S = 1.0
+# Pongs must stay fast this long before lag mode ends. A still-slow reader needs
+# ~25 s of finals-only to drain its read-ahead, and every failed retry refills it;
+# measured on T3 (median of 3): 10 s -> 99.7% finals, 30 s -> 98.9%, 60 s -> 100%.
+RECOVER_S = 60.0
+# Backoff cap: a client that keeps relapsing is retried at most this rarely.
+RECOVER_MAX_S = 120.0
+# Re-entering lag within this long of leaving it counts as a relapse (doubles the
+# wait); a longer calm period resets the wait to the base.
+REARM_S = 120.0
 
 
 @dataclass(slots=True)
@@ -60,6 +78,7 @@ class ClientChannel:
         on_overflow: Callable[["ClientChannel"], None] | None = None,
         ping: Callable[[], Awaitable[Awaitable[object]]] | None = None,
         lag_s: float = LAG_S,
+        recover_s: float = RECOVER_S,
     ) -> None:
         self._send = send
         self.client_id = client_id
@@ -73,6 +92,13 @@ class ClientChannel:
         self.lag_s = lag_s
         self.lagging = False
         self.lag_entries = 0
+        self.lag_exits = 0
+        self._base_recover_s = recover_s
+        self._recover_s = recover_s  # current wait; doubles on relapse
+        self._calm_since: float | None = None  # when pongs last turned fast
+        self._left_lag_at: float | None = None
+        self._pong_at = 0.0
+        self._classified = True  # has the current pong's speed been recorded?
         self._pong: asyncio.Future[object] | None = None
         self._ping_at = 0.0
         self._wakeup = asyncio.Event()
@@ -154,10 +180,27 @@ class ClientChannel:
             while not self.closed:
                 self._check_lag()
                 if self.lagging:
-                    if self._pong is not None and not self._pong.done():
-                        await self._wait_pong(self._pong)
+                    pong = self._pong
+                    if pong is not None and (not pong.done() or not self._classified):
+                        await self._wait_pong(pong)
+                        continue
+                    if self._can_leave_lag():
+                        self._leave_lag()
                         continue
                     item = self._take_sendable()
+                    if item is None and self._ping is not None:
+                        # Nothing to send: probe at most every lag_s so pong
+                        # speed keeps being measured, else sleep until then.
+                        due = self._ping_at + self.lag_s - asyncio.get_running_loop().time()
+                        if due <= 0:
+                            await self._start_ping()
+                        else:
+                            self._wakeup.clear()
+                            try:
+                                await asyncio.wait_for(self._wakeup.wait(), due)
+                            except asyncio.TimeoutError:
+                                pass
+                        continue
                 else:
                     item = self._queue.popleft() if self._queue else None
                     if item is not None:
@@ -169,21 +212,57 @@ class ClientChannel:
                 await self._send(item.wire)
                 self.sent += 1
                 if self._ping is not None and (self._pong is None or self._pong.done()):
-                    self._pong = asyncio.ensure_future(await self._ping())
-                    # Retrieve a failure (connection closed) so asyncio doesn't log it.
-                    self._pong.add_done_callback(lambda f: f.cancelled() or f.exception())
-                    self._ping_at = asyncio.get_running_loop().time()
+                    await self._start_ping()
         except asyncio.CancelledError:
             raise
         except Exception:
             # Connection closed or send failed: this client is gone.
             self.close()
 
+    async def _start_ping(self) -> None:
+        assert self._ping is not None
+        loop = asyncio.get_running_loop()
+        pong = asyncio.ensure_future(await self._ping())
+        self._pong = pong
+        self._classified = False
+        self._ping_at = loop.time()
+
+        def done(f: asyncio.Future[object]) -> None:
+            self._pong_at = loop.time()
+            # Retrieve a failure (connection closed) so asyncio doesn't log it.
+            if not f.cancelled():
+                f.exception()
+
+        pong.add_done_callback(done)
+
+    def _can_leave_lag(self) -> bool:
+        if self._calm_since is None:
+            return False
+        if asyncio.get_running_loop().time() - self._calm_since < self._recover_s:
+            return False
+        return not any(i.caption is None or i.caption.final for i in self._queue)
+
+    def _leave_lag(self) -> None:
+        # The queue holds at most one provisional per segment (the newest, thanks
+        # to _compact + in-place coalescing), and new offers append after it, so
+        # normal delivery from here never sends an older revision after a newer one.
+        self.lagging = False
+        self.coalescing = False
+        self.lag_exits += 1
+        self._left_lag_at = asyncio.get_running_loop().time()
+        self._calm_since = None
+
     def _check_lag(self) -> None:
         pong = self._pong
         if self.lagging or pong is None or pong.done():
             return
-        if asyncio.get_running_loop().time() - self._ping_at > self.lag_s:
+        now = asyncio.get_running_loop().time()
+        if now - self._ping_at > self.lag_s:
+            if self._left_lag_at is not None and now - self._left_lag_at < REARM_S:
+                self._recover_s = min(self._recover_s * 2, RECOVER_MAX_S)
+            else:
+                self._recover_s = self._base_recover_s
+            self._calm_since = None
             self.lagging = True
             self.coalescing = True
             self.lag_entries += 1
@@ -222,6 +301,12 @@ class ClientChannel:
             closer.cancel()
         if pong.done() and not pong.cancelled() and pong.exception() is not None:
             self.close()
+        elif pong.done() and not pong.cancelled():
+            self._classified = True
+            if self._pong_at - self._ping_at > self.lag_s:
+                self._calm_since = None
+            elif self._calm_since is None:
+                self._calm_since = self._pong_at
 
     def close(self) -> None:
         self.closed = True
