@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
@@ -40,6 +41,10 @@ CHANNELS: set[ClientChannel] = set()
 _BACKGROUND: set[asyncio.Task] = set()
 
 STATS_INTERVAL_S = 10.0
+# Baseline for before/after comparisons: plain FIFO per client, no lag
+# detection, coalescing or hopeless cap. Set by --no-coalesce, or by
+# LIVERECALL_NO_COALESCE=1 because run_demo.py starts us with --port only.
+NO_COALESCE = False
 
 
 def _spawn(coro) -> None:
@@ -98,7 +103,13 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         print(f"client overflow, closing: id={client_id}", flush=True)
         _spawn(ws.close(code=1013, reason="client too far behind; reconnect to resume"))
 
-    channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow, ping=ws.ping)
+    if NO_COALESCE:
+        # No ping means lag mode (and so coalescing) never turns on.
+        channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow,
+                                hopeless_s=float("inf"))
+    else:
+        channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow,
+                                ping=ws.ping)
 
     # --- atomic section: no await between snapshot and registration ---------
     items = STATE.history_for(last_segment, last_revision, hello.get("history_seconds"))
@@ -182,7 +193,14 @@ async def main_async(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--no-coalesce", action="store_true",
+                        default=os.environ.get("LIVERECALL_NO_COALESCE") == "1",
+                        help="baseline: plain FIFO delivery (for before/after runs)")
     args = parser.parse_args()
+    global NO_COALESCE
+    NO_COALESCE = args.no_coalesce
+    if NO_COALESCE:
+        print("baseline mode: --no-coalesce (plain FIFO)", flush=True)
     try:
         asyncio.run(main_async(args.port))
     except KeyboardInterrupt:

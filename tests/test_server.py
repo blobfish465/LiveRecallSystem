@@ -219,3 +219,22 @@ def test_client_dropping_mid_stream_does_not_affect_others():
         await server.wait_closed()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("no_coalesce", [False, True])
+def test_no_coalesce_selects_plain_fifo_channel(monkeypatch, no_coalesce):
+    monkeypatch.setattr(solution_server, "NO_COALESCE", no_coalesce)
+
+    async def main():
+        server, uri = await start_server()
+        async with websockets.connect(uri) as cl:
+            await hello(cl)
+            await wait_for_state(lambda: len(solution_server.CHANNELS) == 1)
+            (channel,) = solution_server.CHANNELS
+            # Without a ping the channel can never detect lag, so never coalesces.
+            assert (channel._ping is None) == no_coalesce
+            assert (channel.hopeless_s == float("inf")) == no_coalesce
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(main())
