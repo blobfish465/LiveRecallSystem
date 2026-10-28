@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -8,11 +9,11 @@ from liverecall.channel import ClientChannel
 from liverecall.state import make_caption
 
 
-def cap(seg, rev, final=False):
+def cap(seg, rev, final=False, recv_ts=None):
     c = make_caption({
         "segment": seg, "revision": rev, "final": final,
         "source_ts": 1.0, "text": f"s{seg}r{rev}",
-    }, 0.0)
+    }, time.time() if recv_ts is None else recv_ts)
     assert c is not None  # test inputs are always valid
     return c
 
@@ -65,10 +66,10 @@ def test_full_delivery_when_not_over_cap():
     for seg in range(1, 21):
         for rev in (1, 2, 3):
             ch.offer(cap(seg, rev, rev == 3))
-    assert ch.pending == 60 and ch.dropped == 0
+    assert ch.pending == 60 and ch.coalesced == 0
 
 
-def test_over_cap_drops_only_superseded_provisionals():
+def test_over_cap_compacts_only_superseded_provisionals():
     ch = ClientChannel(Recorder(), max_pending=25)
     for seg in range(1, 21):
         for rev in (1, 2, 3):
@@ -79,7 +80,7 @@ def test_over_cap_drops_only_superseded_provisionals():
     # Finals are never dropped while the channel is open.
     assert [c.segment for c in caps if c.final] == list(range(1, 21))
     # Only provisionals were dropped, and each had a newer item of its segment.
-    assert ch.dropped == 60 - len(caps) == 35
+    assert ch.coalesced == 60 - len(caps)
 
 
 def test_latest_provisional_of_active_segment_kept():
@@ -87,7 +88,7 @@ def test_latest_provisional_of_active_segment_kept():
     ch.offer(cap(1, 3, True))
     ch.offer(cap(2, 3, True))
     ch.offer(cap(3, 1))
-    ch.offer(cap(3, 2))  # over cap -> drops (3,1), keeps newest (3,2)
+    ch.offer(cap(3, 2))  # over cap -> compacts away (3,1), keeps newest (3,2)
     assert queued(ch) == [(1, 3), (2, 3), (3, 2)]
 
 
@@ -100,6 +101,30 @@ def test_overflow_when_backlog_is_all_finals():
     assert ch.pending == 0
     ch.offer(cap(7, 1, True))  # ignored once closed
     assert ch.pending == 0
+
+
+def test_age_cap_closes_hopeless_client():
+    now = [1000.0]
+    hits = []
+    ch = ClientChannel(Recorder(), hopeless_s=30.0, clock=lambda: now[0], on_overflow=hits.append)
+    ch.offer_control('{"type":"HISTORY","items":[]}')  # ignored by the age check
+    ch.offer(cap(1, 1, True, recv_ts=1000.0))
+    now[0] = 1030.0  # exactly at the limit: not over
+    ch.offer(cap(2, 1, True, recv_ts=1030.0))
+    assert not ch.closed and hits == []
+    now[0] = 1030.5
+    ch.offer(cap(3, 1, True, recv_ts=1030.5))
+    assert ch.overflowed and ch.closed and hits == [ch]
+    ch.offer(cap(4, 1, True, recv_ts=1031.0))
+    assert hits == [ch]
+
+
+def test_age_check_ignores_control_items():
+    now = [5000.0]
+    ch = ClientChannel(Recorder(), hopeless_s=30.0, clock=lambda: now[0])
+    ch.offer_control('{"type":"HISTORY","items":[]}')
+    ch.offer(cap(1, 1, True, recv_ts=5000.0))
+    assert not ch.closed and ch.pending == 2
 
 
 def test_send_failure_closes_channel():

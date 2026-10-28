@@ -156,7 +156,7 @@ async def report_stats() -> None:
             f"[stats {time.strftime('%H:%M:%S')}] clients={len(CHANNELS)} "
             f"history={STATE.history_len} active={STATE.active_len} "
             f"max_pending={max(pending, default=0)} "
-            f"dropped={sum(c.dropped for c in CHANNELS)}",
+            f"coalesced={sum(c.coalesced for c in CHANNELS)}",
             flush=True,
         )
 

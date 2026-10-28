@@ -4,15 +4,13 @@ Every connected client gets one ClientChannel: a bounded queue plus one
 sender task. The source handler calls offer(), which never awaits, so one slow
 client can never delay the source or any other client.
 
-Day-1 overload policy (deliberately simple; Day 2 extends it):
-  * The queue holds at most `max_pending` items.
-  * When it is over the cap, drop the oldest *superseded* provisional, i.e.
-    a provisional revision for which a newer item of the same segment is
-    already queued. Finals and control messages (HISTORY) are never dropped.
-  * If nothing can be dropped (the backlog is all finals), the client is too
-    far behind to catch up live: close it. It reconnects and recovers the
-    finals it missed from the server's bounded HISTORY, so state stays bounded
-    and nothing final is lost.
+Overload cap (hopeless clients): a client that reads slower than finals arrive
+accumulates undelivered finals forever, and coalescing cannot shrink finals. So
+the channel closes it when its oldest queued caption is older than `hopeless_s`,
+or when the queue exceeds `max_pending` even after dropping superseded
+provisionals. It reconnects and recovers the finals it missed from the server's
+bounded HISTORY (90 s), which is why `hopeless_s` stays well inside that window.
+Finals and control messages (HISTORY) are never dropped while the channel is open.
 
 Coalescing mode (Day 2, opt-in via `coalescing`, default off): while on, a new
 caption replaces the still-unsent queued provisional of the same segment in
@@ -42,13 +40,20 @@ still-slow client is not re-flooded. A longer calm period resets the wait.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .state import Caption
 
-DEFAULT_MAX_PENDING = 256
+# Queued caption older than this -> hopeless (close; reconnect recovers via HISTORY,
+# well inside its 90 s window). Our queue only sees the client's pauses, which last
+# ~13 reads (read-ahead high 16 -> low 4): ~6.5 s at 2 msg/s (T3, can keep up), but
+# > 10 s once a reader is slower than finals arrive (~1.33/s). 30 s never fired.
+HOPELESS_S = 10.0
+# Memory safety net (e.g. bursty sources); the age cap normally triggers first.
+DEFAULT_MAX_PENDING = 64
 # A pong later than this means the client stopped reading; loopback RTT is ~ms and
 # the T5 profile adds ~0.25 s RTT, so 1 s avoids false positives.
 LAG_S = 1.0
@@ -79,10 +84,14 @@ class ClientChannel:
         ping: Callable[[], Awaitable[Awaitable[object]]] | None = None,
         lag_s: float = LAG_S,
         recover_s: float = RECOVER_S,
+        hopeless_s: float = HOPELESS_S,
+        clock: Callable[[], float] = time.time,  # same clock as Caption.recv_ts
     ) -> None:
         self._send = send
         self.client_id = client_id
         self.max_pending = max_pending
+        self.hopeless_s = hopeless_s
+        self._clock = clock
         self._on_overflow = on_overflow
         self._queue: deque[Outgoing] = deque()
         # segment -> its most recent still-queued entry (for coalescing).
@@ -106,7 +115,6 @@ class ClientChannel:
         self.closed = False
         # Counters for logs, tests, and the report.
         self.sent = 0
-        self.dropped = 0
         self.coalesced = 0
         self.overflowed = False
 
@@ -129,38 +137,26 @@ class ClientChannel:
                 entry.caption = caption
                 self.coalesced += 1
                 self._wakeup.set()
+                self._check_hopeless()
                 return
         entry = Outgoing(caption.wire, caption)
         self._queue.append(entry)
         self._latest[caption.segment] = entry
         if len(self._queue) > self.max_pending:
-            self._enforce_bound()
-        self._wakeup.set()
-
-    def _enforce_bound(self) -> None:
-        while len(self._queue) > self.max_pending:
-            victim = self._oldest_superseded_provisional()
-            if victim is None:
+            self._compact()
+            if len(self._queue) > self.max_pending:
                 self._overflow()
                 return
-            gone = self._queue[victim]
-            del self._queue[victim]
-            self._forget(gone)
-            self.dropped += 1
+        self._wakeup.set()
+        self._check_hopeless()
 
-    def _oldest_superseded_provisional(self) -> int | None:
-        # Walk newest -> oldest remembering which segments have a newer item,
-        # then pick the oldest provisional whose segment has one.
-        seen: set[int] = set()
-        candidate = None
-        for i in range(len(self._queue) - 1, -1, -1):
-            cap = self._queue[i].caption
-            if cap is None:
-                continue
-            if not cap.final and cap.segment in seen:
-                candidate = i
-            seen.add(cap.segment)
-        return candidate
+    def _check_hopeless(self) -> None:
+        # The oldest caption entry is at (or near) the left; skip control items.
+        for item in self._queue:
+            if item.caption is not None:
+                if self._clock() - item.caption.recv_ts > self.hopeless_s:
+                    self._overflow()
+                return
 
     def _forget(self, item: Outgoing) -> None:
         cap = item.caption
