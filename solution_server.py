@@ -45,6 +45,8 @@ STATS_INTERVAL_S = 10.0
 # detection, coalescing or hopeless cap. Set by --no-coalesce, or by
 # LIVERECALL_NO_COALESCE=1 because run_demo.py starts us with --port only.
 NO_COALESCE = False
+# Counters of channels that have closed, so the [stats] totals survive disconnects.
+CLOSED_TOTALS = {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0}
 
 
 def _spawn(coro) -> None:
@@ -134,6 +136,9 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         CHANNELS.discard(channel)
         channel.close()
         sender.cancel()
+        CLOSED_TOTALS["coalesced"] += channel.coalesced
+        CLOSED_TOTALS["lag_entries"] += channel.lag_entries
+        CLOSED_TOTALS["hopeless_closes"] += channel.overflowed
         print(f"client disconnected: id={client_id}; clients={len(CHANNELS)}", flush=True)
 
 
@@ -162,14 +167,22 @@ async def report_stats() -> None:
     """Periodic one-line summary; useful when watching memory/queue bounds."""
     while True:
         await asyncio.sleep(STATS_INTERVAL_S)
-        pending = [c.pending for c in CHANNELS]
-        print(
-            f"[stats {time.strftime('%H:%M:%S')}] clients={len(CHANNELS)} "
-            f"history={STATE.history_len} active={STATE.active_len} "
-            f"max_pending={max(pending, default=0)} "
-            f"coalesced={sum(c.coalesced for c in CHANNELS)}",
-            flush=True,
-        )
+        print(stats_line(), flush=True)
+
+
+def stats_line() -> str:
+    """Live values for connected clients; *_total also counts closed ones."""
+    live = list(CHANNELS)
+    coalesced = CLOSED_TOTALS["coalesced"] + sum(c.coalesced for c in live)
+    lag_entries = CLOSED_TOTALS["lag_entries"] + sum(c.lag_entries for c in live)
+    return (
+        f"[stats {time.strftime('%H:%M:%S')}] clients={len(live)} "
+        f"lagging={sum(c.lagging for c in live)} "
+        f"history={STATE.history_len} active={STATE.active_len} "
+        f"max_pending={max((c.pending for c in live), default=0)} "
+        f"coalesced_total={coalesced} lag_entries_total={lag_entries} "
+        f"hopeless_closes_total={CLOSED_TOTALS['hopeless_closes']}"
+    )
 
 
 async def main_async(port: int) -> None:

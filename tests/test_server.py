@@ -14,6 +14,8 @@ from liverecall.state import CaptionState
 @pytest.fixture(autouse=True)
 def fresh_server_state(monkeypatch):
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
+    monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
+                        {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0})
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()
@@ -234,6 +236,25 @@ def test_no_coalesce_selects_plain_fifo_channel(monkeypatch, no_coalesce):
             # Without a ping the channel can never detect lag, so never coalesces.
             assert (channel._ping is None) == no_coalesce
             assert (channel.hopeless_s == float("inf")) == no_coalesce
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(main())
+
+
+def test_stats_totals_survive_disconnect():
+    async def main():
+        server, uri = await start_server()
+        async with websockets.connect(uri) as cl:
+            await hello(cl)
+            await wait_for_state(lambda: len(solution_server.CHANNELS) == 1)
+            (channel,) = solution_server.CHANNELS
+            channel.coalesced, channel.lag_entries = 5, 2
+            assert "coalesced_total=5 lag_entries_total=2" in solution_server.stats_line()
+        await wait_for_state(lambda: solution_server.CLOSED_TOTALS["coalesced"] == 5)
+        line = solution_server.stats_line()
+        assert "clients=0 " in line
+        assert "coalesced_total=5 lag_entries_total=2 hopeless_closes_total=0" in line
         server.close()
         await server.wait_closed()
 
