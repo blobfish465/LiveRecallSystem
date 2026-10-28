@@ -1,2 +1,4 @@
 # Mandatory deterministic path only.
-websockets>=13,<17
+# Pinned to 16.x: lag detection relies on this version's client read-ahead
+# (stops reading, pings included, at 16 queued frames); measured on 16.1.1.
+websockets>=16,<17
