@@ -98,7 +98,7 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         print(f"client overflow, closing: id={client_id}", flush=True)
         _spawn(ws.close(code=1013, reason="client too far behind; reconnect to resume"))
 
-    channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow)
+    channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow, ping=ws.ping)
 
     # --- atomic section: no await between snapshot and registration ---------
     items = STATE.history_for(last_segment, last_revision, hello.get("history_seconds"))

@@ -202,3 +202,128 @@ def test_control_stays_first_with_coalescing():
         assert keys(rec.sent) == [(1, 2), (2, 1)]
 
     asyncio.run(main())
+
+
+class FakePing:
+    """Stands in for ws.ping: each call returns a future the test resolves by hand."""
+
+    def __init__(self, auto=False):
+        self.auto = auto
+        self.futures = []
+
+    async def __call__(self):
+        fut = asyncio.get_running_loop().create_future()
+        if self.auto:
+            fut.set_result(None)
+        self.futures.append(fut)
+        return fut
+
+
+async def settle(n=20):
+    for _ in range(n):
+        await asyncio.sleep(0)
+
+
+def test_fast_client_never_lags():
+    async def main():
+        rec, ping = Recorder(), FakePing(auto=True)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        task = asyncio.create_task(ch.run())
+        want = []
+        for seg in range(1, 4):
+            for rev in (1, 2, 3):
+                ch.offer(cap(seg, rev, rev == 3))
+                want.append((seg, rev))
+        await drain(ch, task)
+        assert keys(rec.sent) == want
+        assert not ch.lagging and ch.coalesced == 0 and ch.lag_entries == 0
+
+    asyncio.run(main())
+
+
+def test_stuck_pong_enters_lag_mode_and_holds_provisionals():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        assert keys(rec.sent) == [(1, 1)] and len(ping.futures) == 1
+        await asyncio.sleep(0.1)
+        ch.offer(cap(2, 1))
+        await settle()
+        assert ch.lagging and ch.coalescing and ch.lag_entries == 1
+        ch.offer(cap(2, 2))
+        ch.offer(cap(2, 3))
+        await settle()
+        assert ch.coalesced >= 1
+        assert keys(rec.sent) == [(1, 1)]  # nothing sent while the pong is outstanding
+        assert queued(ch) == [(2, 3)]
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_lag_mode_releases_one_final_per_pong():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)
+        ch.offer(cap(9, 1, True))  # wakes the sender, which notices the overdue pong
+        await settle()
+        assert ch.lagging
+        for seg in (2, 3, 4):
+            ch.offer(cap(seg, 1))
+            ch.offer(cap(seg, 2))
+            ch.offer(cap(seg, 3, True))
+        await settle()
+        expect = [(1, 1)]
+        for nxt in [(9, 1), (2, 3), (3, 3), (4, 3)]:
+            assert keys(rec.sent) == expect
+            ping.futures[-1].set_result(None)
+            await settle()
+            expect = expect + [nxt]
+        assert keys(rec.sent) == expect
+        # No provisional of a segment that has a final was sent after lag began.
+        assert all(m["final"] for m in rec.sent[1:])
+        assert queued(ch) == []
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_entering_lag_drops_provisionals_queued_before_it():
+    # Queued before coalescing was on, so each revision got its own entry.
+    ch = ClientChannel(Recorder())
+    for c in [cap(2, 1), cap(2, 2), cap(2, 3, True), cap(3, 1), cap(3, 2)]:
+        ch.offer(c)
+    ch._compact()
+    assert queued(ch) == [(2, 3), (3, 2)]
+    assert ch.coalesced == 3
+
+
+def test_lag_with_only_provisionals_blocks_and_close_is_prompt():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)
+        ch.offer(cap(2, 1))
+        await settle()
+        assert ch.lagging
+        ping.futures[-1].set_result(None)  # pong arrives; only a provisional is queued
+        await settle()
+        count = len(rec.sent)
+        await settle(200)
+        assert len(rec.sent) == count == 1 and queued(ch) == [(2, 1)]
+        ch.close()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(main())

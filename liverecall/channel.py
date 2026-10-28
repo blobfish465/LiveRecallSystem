@@ -18,7 +18,16 @@ Coalescing mode (Day 2, opt-in via `coalescing`, default off): while on, a new
 caption replaces the still-unsent queued provisional of the same segment in
 place (keeping its queue position) instead of being appended. Finals and
 control messages are never replaced. It is meant to be on only while the client
-is lagging; lag detection is wired up separately, so by default nothing changes.
+is lagging.
+
+Lag detection (Day 2, needs `ping`): ws.send() returns as soon as bytes are in
+socket buffers, so a slow reader's backlog never shows in our queue. But the
+websockets client stops parsing incoming frames (pings too) once its read queue
+is full, so a pong later than `lag_s` means "this client hasn't processed what we
+sent". After each send we keep one ping outstanding; if its pong is overdue the
+channel enters lag mode: coalescing turns on and only finals / control messages
+are sent, stop-and-wait (one send, then wait for its pong). Provisionals stay
+queued and keep being coalesced. Lag mode is sticky for now (no recovery yet).
 """
 
 from __future__ import annotations
@@ -31,6 +40,9 @@ from typing import Awaitable, Callable
 from .state import Caption
 
 DEFAULT_MAX_PENDING = 256
+# A pong later than this means the client stopped reading; loopback RTT is ~ms and
+# the T5 profile adds ~0.25 s RTT, so 1 s avoids false positives.
+LAG_S = 1.0
 
 
 @dataclass(slots=True)
@@ -46,6 +58,8 @@ class ClientChannel:
         client_id: object = None,
         max_pending: int = DEFAULT_MAX_PENDING,
         on_overflow: Callable[["ClientChannel"], None] | None = None,
+        ping: Callable[[], Awaitable[Awaitable[object]]] | None = None,
+        lag_s: float = LAG_S,
     ) -> None:
         self._send = send
         self.client_id = client_id
@@ -55,7 +69,14 @@ class ClientChannel:
         # segment -> its most recent still-queued entry (for coalescing).
         self._latest: dict[int, Outgoing] = {}
         self.coalescing = False
+        self._ping = ping
+        self.lag_s = lag_s
+        self.lagging = False
+        self.lag_entries = 0
+        self._pong: asyncio.Future[object] | None = None
+        self._ping_at = 0.0
         self._wakeup = asyncio.Event()
+        self._closed_evt = asyncio.Event()
         self.closed = False
         # Counters for logs, tests, and the report.
         self.sent = 0
@@ -131,18 +152,75 @@ class ClientChannel:
         """Sender loop: one in-flight send at a time, in queue order."""
         try:
             while not self.closed:
-                if not self._queue:
+                self._check_lag()
+                if self.lagging:
+                    if self._pong is not None and not self._pong.done():
+                        await self._wait_pong(self._pong)
+                        continue
+                    item = self._take_sendable()
+                else:
+                    item = self._queue.popleft() if self._queue else None
+                    if item is not None:
+                        self._forget(item)
+                if item is None:
                     self._wakeup.clear()
                     await self._wakeup.wait()
                     continue
-                item = self._queue.popleft()
-                self._forget(item)
                 await self._send(item.wire)
                 self.sent += 1
+                if self._ping is not None and (self._pong is None or self._pong.done()):
+                    self._pong = asyncio.ensure_future(await self._ping())
+                    # Retrieve a failure (connection closed) so asyncio doesn't log it.
+                    self._pong.add_done_callback(lambda f: f.cancelled() or f.exception())
+                    self._ping_at = asyncio.get_running_loop().time()
         except asyncio.CancelledError:
             raise
         except Exception:
             # Connection closed or send failed: this client is gone.
+            self.close()
+
+    def _check_lag(self) -> None:
+        pong = self._pong
+        if self.lagging or pong is None or pong.done():
+            return
+        if asyncio.get_running_loop().time() - self._ping_at > self.lag_s:
+            self.lagging = True
+            self.coalescing = True
+            self.lag_entries += 1
+            self._compact()
+
+    def _compact(self) -> None:
+        """Drop provisionals queued before lag mode that a newer entry of the
+        same segment supersedes; otherwise they could be sent after their final."""
+        seen: set[int] = set()
+        keep: deque[Outgoing] = deque()
+        for item in reversed(self._queue):
+            cap = item.caption
+            if cap is not None and not cap.final and cap.segment in seen:
+                self.coalesced += 1
+                continue
+            if cap is not None:
+                seen.add(cap.segment)
+            keep.appendleft(item)
+        self._queue = keep
+
+    def _take_sendable(self) -> Outgoing | None:
+        """Lag mode: remove and return the oldest control message or final."""
+        for i, item in enumerate(self._queue):
+            if item.caption is None or item.caption.final:
+                del self._queue[i]
+                self._forget(item)
+                return item
+        return None
+
+    async def _wait_pong(self, pong: asyncio.Future[object]) -> None:
+        """Wait for the pong, or for close(). A failed pong means the connection is gone."""
+        closer = asyncio.ensure_future(self._closed_evt.wait())
+        try:
+            await asyncio.wait({pong, closer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            closer.cancel()
+        if pong.done() and not pong.cancelled() and pong.exception() is not None:
             self.close()
 
     def close(self) -> None:
@@ -150,6 +228,7 @@ class ClientChannel:
         self._queue.clear()
         self._latest.clear()
         self._wakeup.set()
+        self._closed_evt.set()
 
     @property
     def pending(self) -> int:
