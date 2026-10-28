@@ -5,26 +5,57 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LiveRecall Student Client</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    #status { font-weight: 700; }
-    #live { min-height: 6rem; border: 1px solid #bbb; border-radius: .4rem; padding: 1rem; margin: 1rem 0; }
-    .naive-line { padding: .25rem 0; border-bottom: 1px dotted #ddd; }
-    button { padding: .55rem .75rem; margin: .2rem; }
-    #recall { white-space: pre-wrap; margin-top: 1rem; border-left: 3px solid #ccc; padding-left: 1rem; }
-    .hint { font-size: .9rem; color: #555; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 1.5rem auto; padding: 0 1rem; color: #222; }
+    h1 { margin-bottom: .2rem; }
+    h2 { font-size: 1.1rem; margin: 1.2rem 0 .4rem; }
+    .hint { font-size: .9rem; color: #555; margin: .3rem 0; }
+
+    /* Connection state is always visible and colour-coded. */
+    #status { font-weight: 700; padding: .15rem .5rem; border-radius: .4rem; }
+    #status[data-state="connected"] { background: #dcf5e3; color: #176b34; }
+    #status[data-state="connecting"] { background: #fff2c6; color: #7a5a00; }
+    #status[data-state="disconnected"] { background: #fde0dc; color: #9b2c1f; }
+
+    /* Live panel: one row per segment, updated in place. */
+    #live { min-height: 8rem; max-height: 22rem; overflow-y: auto; border: 1px solid #bbb; border-radius: .4rem; padding: .5rem; }
+    .caption { display: flex; gap: .7rem; padding: .3rem .5rem; border-left: 4px solid #ccc; margin: .15rem 0; }
+    .caption .meta { font-family: ui-monospace, monospace; font-size: .85rem; color: #888; min-width: 6rem; }
+    .caption.provisional { color: #666; font-style: italic; border-color: #e0a800; }
+    .caption.final { color: #111; border-color: #1a7f37; }
+    .caption:last-child { background: #f6f8fa; }
+
+    .controls button { padding: .55rem .75rem; margin: .2rem .2rem .2rem 0; border: 1px solid #999; border-radius: .4rem; background: #f3f3f3; cursor: pointer; }
+    .controls button.primary { background: #0b5fd6; color: #fff; border-color: #0b5fd6; font-weight: 600; }
+    .controls button.active { outline: 3px solid #8ab4f8; }
+    .controls button#drop { float: right; background: #fff; }
+
+    #recall { border-left: 3px solid #1a7f37; padding-left: 1rem; margin-top: .5rem; }
+    #recall p { margin: .3rem 0; }
+    #stats { font-family: ui-monospace, monospace; font-size: .8rem; color: #777; word-break: break-all; }
   </style>
 </head>
 <body>
   <h1>LiveRecall</h1>
-  <p>Connection: <span id="status">disconnected</span></p>
-  <p class="hint">Starter behavior is intentionally naive: every received revision is appended as a new line.</p>
-  <div id="live"></div>
-  <div>
-    <button data-seconds="30">What did I miss? (30 s)</button>
+  <p>Connection: <span id="status" data-state="disconnected">not connected</span></p>
+
+  <h2>Live captions</h2>
+  <p class="hint">Grey italic rows marked … are provisional and may still change; dark rows marked ✓ are final. A newer revision replaces its row in place.</p>
+  <div id="live" aria-live="polite"></div>
+
+  <h2>What did I miss?</h2>
+  <div class="controls">
+    <button data-seconds="30" class="primary">What did I miss? (30 s)</button>
     <button data-seconds="15">15 s</button>
+    <button data-seconds="30">30 s</button>
     <button data-seconds="60">60 s</button>
+    <button id="drop" title="Close the connection for 5 s to show automatic reconnect and recovery">Simulate 5 s network drop</button>
   </div>
-  <div id="recall">TODO: implement the locally maintained recall view.</div>
+  <p id="recall-title" class="hint">Shows finalized captions already stored in this page; nothing is requested from the server.</p>
+  <div id="recall"></div>
+
+  <p id="stats"></p>
+
+  <script src="store.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

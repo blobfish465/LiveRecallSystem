@@ -1,3 +1,4 @@
 # Development / test-only dependencies. Not needed to run solution_server.py.
 -r requirements.txt
 pytest>=8
+selenium>=4          # tests/test_client.py (needs Firefox + geckodriver; skipped otherwise)

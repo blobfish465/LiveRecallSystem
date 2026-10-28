@@ -44,12 +44,18 @@ Gates for every scenario: final completeness 100%, duplicates 0, stale 0, non-fi
 
 ## 3. Manual checklist (browser, Day 3)
 
-- [ ] Two browsers show the same live stream
-- [ ] Provisional vs final visually distinct; revisions replace in place (no duplicate lines)
-- [ ] "What did I miss?" defaults to 30 s; 15/30/60 s work from local state only (no server request)
-- [ ] Stop server → status shows disconnected → restart → auto-reconnects, recovers missed finals, no duplicates
-- [ ] New tab mid-lecture gets recent context, then live
-- [ ] WS URL configurable (browser on a different host from the server)
+Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
+Firefox/geckodriver are missing, e.g. WSL2): in-place revision replacement and provisional/final styling,
+recall 15/30/60 s from local state only, drop → auto-reconnect → HISTORY recovery with no duplicates and
+resume from the latest final, late join in a second tab, server+source restart detection.
+Still check by hand before the demo (`python -m http.server 8000 --directory client`):
+
+- [ ] Two tabs show the same live stream; provisional rows grey/italic with …, finals dark with ✓; no duplicate lines
+- [ ] "What did I miss?" defaults to 30 s; 15/30/60 s switch the window; the panel updates as new finals arrive
+- [ ] "Simulate 5 s network drop" → status red → auto-reconnect → missed finals recovered (stats line: recovered N, duplicates 0)
+- [ ] New tab mid-lecture: the recall panel shows the recent context at once, then live rows follow
+- [ ] Browser on a different host: open `http://<server-ip>:8000/` (connects to `ws://<server-ip>:8765` by default) or pass `?ws=ws://<server-ip>:8765`
+- [ ] Restart server + source mid-lecture (stopping the server also ends the source, so numbering restarts at 1): the tab shows "stream restarted, rejoining" and continues with the new run (stats: restarts 1)
 
 ## Still to add (owners per CLAUDE.md)
 
