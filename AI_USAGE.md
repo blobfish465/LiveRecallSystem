@@ -15,6 +15,18 @@
   3. **Test environment (the main one, see final section below):** the AI suggested running the Ubuntu experiments in a VirtualBox VM (and the original plan suggested Multipass). On this Windows laptop that produced invalid numbers, which it initially reported as test results before the root cause was found. Switched to WSL2 for development and added a timer-drift check.
 - **What I checked myself:** TODO (lihloway: fill in what you read/verified so you can defend it in the viva).
 
+### Day 2 (muhdbhz) — slow-reader backpressure
+
+- **Tool:** Claude Code (Claude Opus 5.5, with Sonnet sub-agents for implementation).
+- **Used for:** explaining the Day 1 code and the metrics, designing the lag/coalescing policy, implementing `liverecall/channel.py` changes and tests commit by commit, running the before/after and parameter measurements in WSL2.
+- **Useful suggestion:** use pong delay as the lag signal. The websockets client stops reading (pings too) once 16 messages are unread, so a late pong reveals a backlog that never shows in our own queue. This took T3 from 95.1% to 100% finals.
+- **Suggestions that were changed/rejected:**
+  1. It proposed a 10 s recovery wait. Measured on T3: 10 s → 99.7% finals, 30 s → 98.9%, 60 s → 100% (each failed retry refills the backlog), so we used 60 s.
+  2. It proposed a 30 s hopeless-client cap. Measured: it never fired, because our queue only sees the client's short pauses. Changed to 10 s, which fires for hopeless readers and never in T3.
+  3. It first claimed slow clients would get sub-second latency. Wrong: the client library's 16-message read-ahead sets a floor of ~8–9 s P95, which we can't coalesce. Documented as a limitation.
+  4. A review of its own lag-mode change found that provisionals queued *before* lag could be sent after their final (stale). Fixed with `_compact()` on lag entry, plus a test.
+- **What I checked myself:** TODO (muhdbhz: fill in what you read/verified so you can defend it in the viva).
+
 ## Tools used
 
 TODO (final): list all tools across the team.

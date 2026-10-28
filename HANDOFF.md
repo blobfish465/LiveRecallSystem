@@ -170,7 +170,88 @@ Naive starter server ("before" baseline, same harness, default public durations)
 
 ---
 
-## Day 2 — TBD
+## Day 2 — muhdbhz — slow-reader backpressure
+
+### Status: DONE
+
+`pytest` (63 tests), pyright (0 errors) and `python check.py` (**t3 now gated**) pass on WSL2 Ubuntu 26.04, Python 3.10.22, websockets 16.1.1, timer drift +0%.
+
+Done: lag detection, lag-only provisional coalescing, finals-only delivery while lagging, recovery to full delivery, a cap for hopeless clients, `--no-coalesce` baseline, cumulative `[stats]`, t3 gate, `write_limit`, websockets pinned to 16.x.
+Not done: constrained-bandwidth run (moved to Day 3 with the bandwidth-test script; `write_limit` is untested there).
+
+### Numbers today (median of 3)
+
+Public-test commands from `PUBLIC_TESTS.md` (`--runs 3`). WSL2 Ubuntu 26.04, timer drift +0%: dev numbers, not the reference Mininet VM. Dup/stale/connection errors were 0 in all 12 runs.
+
+```
+- T1 (20 clients, 20 s):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients, 40 s):  P50 6.4 ms, P95 10.1 ms, P99 13.8 ms, completeness 100%
+- T3 (10% slow, 60 s):     normal P95 10.0 ms, slow P95 8890 ms, completeness 100%
+- T4 (20% drop 5 s, 60 s): dup 0, stale 0, completeness 100%, recovery P50 2.6 ms (P95 4.1 ms)
+```
+
+**Before/after** (same session, x3 medians; "before" = `LIVERECALL_NO_COALESCE=1`, plain FIFO):
+
+| | T2 before | T2 after | T3 before | T3 after |
+|---|---|---|---|---|
+| Final completeness | 100% | 100% | **95.1%** | **100%** |
+| Coverage | 100% | 100% | 95.2% | 94.5% |
+| P95 / P99 (all clients) | 7.8 / 11.1 ms | 12.6 / 16.0 ms | 2254 / 24044 ms | 12.2 / 6845 ms |
+| Normal-client P95 | 7.8 ms | 12.6 ms | 5.6 ms | 9.8 ms |
+| Slow-client P50 / P95 | – | – | 14.7 s / 28.1 s | 3.2 s / 8.9 s |
+| Slow fresh (≤ 500 ms) | – | – | 1.7% | 28.4% |
+
+Hopeless readers (20 clients, 10% at 1200 ms/msg, slower than finals arrive, 60 s, x2): 94.2% → 96.6% finals, 2 connection errors (one close + reconnect per hopeless client), ~70 finals recovered via HISTORY.
+
+### How to run
+
+```bash
+python check.py                                   # quick gate, t3 included
+python solution_server.py --port 8765 --no-coalesce          # baseline server
+LIVERECALL_NO_COALESCE=1 python run_demo.py ...    # baseline under the harness (run_demo passes --port only)
+```
+
+### Design (all in `liverecall/channel.py`; module docstring has the full story)
+
+1. **Lag signal = pong delay.** `send()` returns once bytes are in buffers, so our queue never sees a slow reader (Day 1's key finding). But the websockets client stops parsing frames, pings included, once 16 messages are unread. So after each send the channel keeps one ping outstanding (`ping=ws.ping`); a pong later than `LAG_S = 1.0` s means "lagging". 1 s leaves room for T5's ~0.25 s RTT.
+2. **While lagging:** coalescing turns on (a new revision overwrites the unsent provisional of its segment in place), `_compact()` drops provisionals queued before lag that a newer entry supersedes (otherwise one could be sent after its final → stale), and only finals/control are sent, stop-and-wait (one send, wait for its pong). Finals alone are ~1.33 msg/s, below T3's 2 msg/s reader, so slow clients catch up on finals.
+3. **Coalescing is off for clients that keep up**, so they get every revision (coverage is graded). Coverage drops 95.2 → 94.5% on T3 only because slow clients skip provisionals.
+4. **Recovery:** while lagging with nothing to send, probe ping every `LAG_S`; leave lag after `RECOVER_S = 60` s of fast pongs with no final queued. Relapse within `REARM_S = 120` s doubles the wait (cap `RECOVER_MAX_S = 120`). Measured on T3 (x3): 10 s → 99.7% finals, 30 s → 98.9%, 60 s → 100%: each failed retry refills the read-ahead with provisionals and costs finals.
+5. **Hopeless cap:** oldest queued caption older than `HOPELESS_S = 10` s, or > 64 entries after compaction → close 1013 (`on_overflow`); the client reconnects and recovers from HISTORY (90 s window). 30 s never fired: our queue only sees the client's pauses (~13 reads, high 16 → low 4 read-ahead). 10 s fires for hopeless clients and never for T3's.
+6. **`write_limit=4096`** (default 32 KiB) on `websockets.serve`, so on a congested link `send()` blocks sooner and the backlog stays in our coalescable queue. No effect on T3 (measured); untested under bandwidth limits.
+7. **websockets pinned to 16.x:** the lag signal depends on this client read-ahead behaviour.
+
+### Interface for Day 3
+
+```python
+ClientChannel(send, client_id=None, max_pending=64, on_overflow=None, ping=None,
+              lag_s=1.0, recover_s=60.0, hopeless_s=10.0, clock=time.time)
+# offer(), offer_control(), run(), close() unchanged.
+# Counters: sent, coalesced, lag_entries, lag_exits, overflowed; state: lagging, pending.
+```
+
+- No `ping` → no lag detection → plain FIFO (that's what `--no-coalesce` does, plus `hopeless_s=inf`).
+- `[stats]` line: `clients lagging history active max_pending coalesced_total lag_entries_total hopeless_closes_total` (totals include disconnected clients).
+- `check.py` t3 gate: 100% finals, 0 dup/stale/conn errors, normal P95 ≤ 100 ms, slow P95 ≤ 15 s.
+
+### Known issues / trade-offs
+
+- **Normal clients pay ~4–5 ms P95** (T2 7.8 → 12.6 ms, T3 5.6 → 9.8 ms, same session, so real, not noise). Likely the ping after every send (doubles the frames written). Possible fix, not tried: at most one ping per ~100 ms (lag detection then reacts up to 100 ms later). Still far under the 500 ms freshness threshold (T2 fresh 100%).
+- **Slow-client latency floor ~8–9 s P95**: the client library buffers 16 messages we can't see or coalesce. Beating it would need the client to read faster.
+- **Hopeless clients can't reach 100%** by definition; each close also counts as a `connection_error` in the harness.
+- **Recovery isn't exercised by a 60 s T3**: slow clients stay lagging (they really are slow). It's unit-tested with short timings; Day 3's slow-then-fast client should test it for real (run > 60 s).
+- Constrained bandwidth not run yet (Day 3).
+
+### Next person should start with
+
+The slow-then-fast convergence client (checks recovery to full delivery, needs > `RECOVER_S`) and the bandwidth run with ~300 clients (checks `write_limit` and whether lag detection triggers on a congested link). Browser client work is independent of all this.
+
+### Report notes (backpressure section)
+
+- Why a bounded app queue alone fails (backlog in socket/library buffers) → pong delay as the lag signal.
+- Policy: coalesce only while lagging, never drop finals, compaction on lag entry, finals-only stop-and-wait, recovery with backoff, hopeless cap + HISTORY.
+- Before/after table above; the 10/30/60 s recovery and 10/30 s hopeless measurements as design evidence.
+- Trade-offs: +4–5 ms normal P95; 8 s floor; hopeless-client connection errors.
 
 ## Day 3 — TBD
 
