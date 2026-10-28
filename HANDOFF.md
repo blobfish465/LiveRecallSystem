@@ -253,6 +253,55 @@ The slow-then-fast convergence client (checks recovery to full delivery, needs >
 - Before/after table above; the 10/30/60 s recovery and 10/30 s hopeless measurements as design evidence.
 - Trade-offs: +4–5 ms normal P95; 8 s floor; hopeless-client connection errors.
 
-## Day 3 — TBD
+## Day 3 — QiAn — browser client, constrained bandwidth
+
+### Status: IN PROGRESS (steps 1–2 of 4 done)
+
+`pytest` (75 tests: 63 + 6 browser + 6 bandwidth-tool) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
+
+Done:
+- **Browser client** (commit 14bfd92): `client/store.js` mirrors the server's revision rules (final durable, never older after newer, duplicate/stale rejected, bounded by 120 s of lecture time and 600 segments); `client/app.js` updates one row per segment in place, styles provisional/final, "What did I miss?" 30 s default + 15/30/60 from local state only, auto-reconnect with backoff resuming from the latest *final*, HISTORY merged through the same rule (no duplicates), late join, server+source restart detection, 30 s stall watchdog, demo drop button, `?ws=` for a server on another host. 6 end-to-end tests in headless Firefox (`tests/test_client.py`, skipped where Firefox is missing).
+- **Constrained-bandwidth experiment** (`bandwidth_test.py`, this section): the Day 2 policy is **worse than a plain FIFO on a slow link**. Details and a proposed fix below.
+
+Not done yet: `check.py --stress` (300–500 clients), slow-then-fast convergence client, the "Numbers today" block (end of day).
+
+### Constrained bandwidth: result
+
+Setup: `python bandwidth_test.py --apply --clients 500 --duration 60 --runs 3`. The public profile's shaper (`tbf rate 2mbit burst 32kbit latency 400ms`) on `lo`, restricted to the server port (this VM is used over an SSH/VS Code tunnel that also runs over `lo`; see the script's docstring). Unmodified `run_demo.py`, "before" = `LIVERECALL_NO_COALESCE=1` (plain FIFO), "after" = the real server, interleaved, median of 3. `write_limit=4096` (Day 2's open question): no effect, `max_pending` stayed 0 for the FIFO in every run; on a slow link the backlog sits in the kernel's send queue and the shaper, never in our outbox.
+
+Demand with no limit (30 s, 1 run, peak over 5 s): 300 clients: FIFO 1.8 Mbit/s, lag-aware 3.3; 500 clients: FIFO 2.9, lag-aware 5.4. 100 clients (~0.6 Mbit/s) never touch the 2 Mbit/s limit; **500 puts both configurations over it**, which makes the comparison fair. The lag-aware server needs ~1.9× the FIFO's bandwidth because it pings after every caption and the client pongs: with permessage-deflate the public transcript (10 repeated sentences) compresses a caption to ~17 B of payload, so the ~52 B of TCP/IP headers per packet dominate, and ping + pong + ACKs cost more than the caption itself.
+
+| 500 clients, 60 s, median of 3 | plain FIFO (before) | lag-aware (after) |
+|---|---:|---:|
+| final completeness | **100%** (98.7 / 100 / 100) | **94.3%** (94.3 / 94.5 / 92.8) |
+| normal update coverage | 98.4% | 41.9% |
+| P50 / P95 / P99 caption age | 1.1 / 1.6 / 2.4 s | 1.0 / **9.3** / 10.5 s |
+| fresh captions / fresh finals (≤ 500 ms) | 0.2% / 0% | 0% / 0% |
+| duplicates / stale | 0 / 0 | 0 / 0 |
+| connection errors | 0 | 392 (= hopeless closes → reconnect + HISTORY) |
+| link usage avg / peak 5 s | 1.72 / 1.81 Mbit/s | 1.68 / 1.80 Mbit/s |
+| tbf packets dropped | 36.7k | 4.5k |
+| lagging clients, peak | 0 | 409 |
+| provisionals coalesced / hopeless closes | 0 / 0 | 49k / 387 |
+| server RSS, max | 58.6 MB | 82.6 MB |
+
+300 clients (1 run): FIFO 100% complete, P95 289 ms, fresh 100%; lag-aware 96.3%, P95 5.2 s, fresh 2.4%, 76 lagging. The FIFO fits in the link at 300 (1.8 Mbit/s demand); the lag-aware server's own control traffic pushes it over the cap, and the lag policy then makes it worse.
+
+**Why** (from `results/bandwidth_limited_c500_*.csv`, 10 s windows): under the FIFO the caption age is *flat* at ~1.1 s for the whole run, every client gets every message: TCP coalesces the tiny queued captions into fewer, larger segments (fewer headers per caption), so the stream fits with a constant ~1 s of queueing. Under the lag-aware server a pong round trip on the congested link takes 0.5–1 s (queueing + RTOs on the shaper's drops), so ~400 clients enter lag mode within 10 s; in lag mode a client gets **one final per round trip** (stop-and-wait), slower than the source's 1.33 finals/s, so finals queue in the channel (`max_pending` 14), the oldest passes `HOPELESS_S = 10 s`, the client is closed with 1013, reconnects, and recovers via HISTORY, which costs still more bandwidth. With an MTU-safe burst (`--burst 66536`, fewer drops) there are no hopeless closes but caption age still grows from 2 s to 4.5 s across the run and completeness is 93.8%.
+
+**Conclusion:** the pong-based lag policy was designed for a slow *reader* (T3: the client stops reading; the link is fine). On a slow *link* it (1) adds ~90% control traffic, (2) caps throughput at one message per RTT, (3) closes clients that are merely queued. A plain FIFO + TCP does better on every graded metric, so the 6-mark "constrained bandwidth" challenge is currently lost against our own baseline. Reported as is; not hidden.
+
+**Proposed fix** (not implemented on Day 3; needs T3 re-validation with `check.py` + the x3 medians):
+1. **Ping budget:** at most one ping per client per ~1 s instead of one per send. T3 detection still works: a stalled reader's pong is late by seconds, not by one RTT.
+2. **No stop-and-wait:** while lagging, send finals as they arrive (1.33/s) and keep coalescing provisionals; keep one ping outstanding only as the lag *measurement*. Finals-only traffic at 500 clients is ~1 Mbit/s, under the cap, so caption age should drop to tens of ms with 100% completeness, i.e. clearly better than the FIFO's 1.6 s P95.
+3. Probe pings in lag mode every ~5 s instead of every `LAG_S` (500 lagging clients × 1 probe/s ≈ 0.5 Mbit/s today).
+4. Optionally read `TCP_INFO` (`tcpi_rtt`, `tcpi_notsent_bytes`, no network cost; `ws.transport.get_extra_info("socket")`) to tell "link congested" (coalesce, keep sending) from "reader stalled" (today's policy).
+
+Methodology notes for the report: shaping only the server port is the public profile with a classifier in front (same rate/burst/latency); sch_tbf drops any packet larger than its burst, and loopback's MTU is 65536, so a single message over 4000 B stalls its connection for ever (a 2 MB probe transfer: 0 B received, 67 drops; with burst 66536: 1.84 Mbit/s). The caption stream never builds such segments (per-connection backlog is a few hundred bytes), but a large uncompressed HISTORY would; keep history replies small or use `--burst 66536` when that matters. Link Mbit/s counts every byte through `lo` in both directions (captions, pings/pongs, ACKs, handshakes); "peak 5 s" is the highest 5 s average, because tbf lets short bursts through. tbf counters and the `[stats]` peaks come from `tc -s qdisc` and the server log of each run.
+
+### Interface / files for the next steps
+
+- `bandwidth_test.py --apply|--unlimited --clients N --duration S --runs R [--only before|after] [--burst B] [--tag T]`; results in `results/bandwidth_<mode><tag>_c<N>_<config>_runNN.{csv,json,log}` + `..._summary.json`. Needs `sudo tc` (passwordless on this VM: `/etc/sudoers.d/liverecall-tc`).
+- The browser client's interface is the protocol only; `window.liverecall` exposes `store`, `counters`, `dropConnection()` for tests and the console.
 
 ## Day 4 — TBD

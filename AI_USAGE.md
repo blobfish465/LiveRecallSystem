@@ -27,6 +27,21 @@
   4. A review of its own lag-mode change found that provisionals queued *before* lag could be sent after their final (stale). Fixed with `_compact()` on lag entry, plus a test.
 - **What I checked myself:** TODO (muhdbhz: fill in what you read/verified so you can defend it in the viva).
 
+### Day 3 (QiAn) — browser client, constrained-bandwidth experiment
+
+- **Tool:** Claude Code (Claude Opus 5.5, then Fable 5.1), with reviewer and skeptic sub-agents on each step.
+- **Used for:** explaining the Day 1–2 code and the metrics in plain words, the browser client (`client/store.js`, `client/app.js`) and its headless-Firefox tests, `bandwidth_test.py`, running the bandwidth experiments and reading the CSVs, drafting the handoff.
+- **Useful suggestions:**
+  1. Measure the link *demand* before choosing the client count. Day 1's estimate suggested ~300 clients; the demand run showed the plain-FIFO baseline still fits at 300 and only the lag-aware server exceeds the cap (its ping after every send doubles its traffic), so 500 is the first fair load.
+  2. Shape only the server port rather than all of `lo`: this VS Code session's SSH tunnel also runs over `lo` and would have been throttled, possibly killing the session mid-experiment.
+  3. In the browser, route HISTORY items and live updates through the same acceptance rule as the server's, so recovered finals can never duplicate or overwrite what is shown.
+- **Suggestions that were wrong or changed:**
+  1. From a bulk-transfer probe (a 2 MB transfer stalls at 0 B under the profile's 4000-byte burst because loopback's MTU is 64 KB) it predicted the public profile would stall the caption stream on `lo`, and changed the script's default burst to the MTU. The real harness run with the profile's parameters showed no stall at all: per-connection backlogs stay a few hundred bytes, so TCP never builds oversized segments. Reverted to the profile's exact parameters; the probe is kept only as a documented caveat for single messages over 4000 B (e.g. a large HISTORY).
+  2. The experiment was framed to *demonstrate* that the Day 2 policy beats a plain queue under constrained bandwidth. The data said the opposite (plain FIFO 100% complete / P95 1.6 s vs 94.3% / 9.3 s at 500 clients). The handoff reports it as a design finding with a proposed fix instead of tuning the setup until it looked good.
+  3. Its first restart detection in the browser store reset on a live update at or below the newest final, but when that update was itself a *final* the page resumed after it and skipped the new run's earlier finals. A skeptic pass found it; fixed with a second reset in `applyUpdate` plus a test that fails without it.
+  4. Its sampler thread shadowed `threading.Thread._stop` with an `Event` named `_stop`, so `join()` crashed; caught on the first smoke test.
+- **What I checked myself:** TODO (QiAn: fill in what you read/verified so you can defend it in the viva).
+
 ## Tools used
 
 TODO (final): list all tools across the team.

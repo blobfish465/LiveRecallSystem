@@ -21,6 +21,7 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 | `liverecall/channel.py` | `ClientChannel`: per-client bounded queue + sender task. **Backpressure/overload policy goes here** |
 | `tests/` | pytest: `test_state.py`, `test_channel.py`, `test_server.py` (real sockets, in-process) |
 | `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first |
+| `bandwidth_test.py` | Constrained-bandwidth experiment (needs `sudo tc`): before/after on a shaped loopback port, link + tbf + `[stats]` + RSS evidence |
 | `HANDOFF.md` / `TESTING.md` | Latest state + numbers / what's tested and how |
 | `results/` | Harness output (gitignored) |
 
