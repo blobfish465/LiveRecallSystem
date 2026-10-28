@@ -8,6 +8,7 @@ but not gated yet. Every gated scenario must have:
   * 0 duplicate, 0 stale, 0 non-final HISTORY items
   * 0 connection errors
   * ~100% Normal Update Coverage where no client is slow/disconnected/late
+  * P95 Caption Age limits for normal / slow clients, where a scenario sets them
 
 Usage:
   python check.py                # quick gate (~3 min), run before every handoff
@@ -32,6 +33,7 @@ RESULTS = HERE / "results"
 # name -> (quick args, full args, gates)
 # Gates: "coverage" = require ~100% Normal Update Coverage.
 #        "gated": False = run and report only (no pass/fail yet).
+#        "normal_p95_max_ms" / "slow_p95_max_ms" = P95 Caption Age limits per role.
 SCENARIOS: dict[str, dict] = {
     "t1": {
         "desc": "T1 basic correctness, 20 clients",
@@ -52,10 +54,11 @@ SCENARIOS: dict[str, dict] = {
         "full": ["--clients", "100", "--duration", "60",
                  "--slow-percent", "10", "--slow-ms", "500"],
         "coverage": False,
-        # Report-only until Day 2's backpressure work: slow readers currently
-        # lose ~half their finals because the backlog sits in socket buffers,
-        # not in our queue (see HANDOFF.md). Day 2: set this to True.
-        "gated": False,
+        # Measured (WSL2, Day 2): normal P95 ~10 ms, slow P95 ~9 s; the
+        # --no-coalesce baseline has slow P95 ~28 s and 95% finals. The slow
+        # floor is the client library's 16-message read-ahead (see HANDOFF.md).
+        "normal_p95_max_ms": 100.0,
+        "slow_p95_max_ms": 15000.0,
     },
     "t4": {
         "desc": "T4 reconnect, 20% disconnect for 5 s",
@@ -99,7 +102,7 @@ def timer_drift() -> float:
     return asyncio.run(measure()) / 1.0 - 1.0
 
 
-def gate(name: str, s: dict, want_coverage: bool) -> list[str]:
+def gate(name: str, s: dict, sc: dict) -> list[str]:
     problems = []
 
     def need(cond: bool, msg: str) -> None:
@@ -111,10 +114,15 @@ def gate(name: str, s: dict, want_coverage: bool) -> list[str]:
          f"final completeness {completeness}% (need 100%)")
     for key in ("duplicates", "stale", "invalid_history_nonfinal", "connection_errors"):
         need(s.get(key, 0) == 0, f"{key}={s.get(key)} (need 0)")
-    if want_coverage:
+    if sc["coverage"]:
         cov = s.get("normal_update_coverage_pct")
         need(cov is not None and cov >= COVERAGE_MIN_PCT,
              f"normal update coverage {cov}% (need >= {COVERAGE_MIN_PCT}%)")
+    for role, key in (("normal", "normal_p95_max_ms"), ("slow", "slow_p95_max_ms")):
+        if key in sc:
+            p95 = s.get(f"{role}_clients", {}).get("p95_ms")
+            need(p95 is not None and p95 <= sc[key],
+                 f"{role} P95 {p95} ms (need <= {sc[key]:.0f} ms)")
     return problems
 
 
@@ -162,7 +170,7 @@ def main() -> int:
         for i, path in enumerate(json_paths, 1):
             label = name if args.runs == 1 else f"{name}#{i}"
             s = json.loads(path.read_text(encoding="utf-8"))
-            problems = gate(name, s, sc["coverage"])
+            problems = gate(name, s, sc)
             if not sc.get("gated", True):
                 rows.append((label, s, "info"))
                 continue
