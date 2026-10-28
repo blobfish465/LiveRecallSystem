@@ -125,3 +125,77 @@ def test_slow_channel_does_not_block_offer():
         task.cancel()
 
     asyncio.run(main())
+
+
+def queued(ch):
+    return [(o.caption.segment, o.caption.revision) for o in ch._queue if o.caption]
+
+
+def test_coalescing_collapses_same_segment_into_one_entry():
+    ch = ClientChannel(Recorder())
+    ch.coalescing = True
+    for c in [cap(1, 1), cap(1, 2), cap(1, 3, True)]:
+        ch.offer(c)
+    assert queued(ch) == [(1, 3)]
+    assert ch.coalesced == 2
+
+
+def test_coalescing_preserves_queue_order():
+    ch = ClientChannel(Recorder())
+    ch.coalescing = True
+    for c in [cap(1, 3, True), cap(2, 1), cap(2, 2), cap(3, 1)]:
+        ch.offer(c)
+    assert queued(ch) == [(1, 3), (2, 2), (3, 1)]
+
+
+def test_coalescing_never_replaces_a_final():
+    ch = ClientChannel(Recorder())
+    ch.coalescing = True
+    ch.offer(cap(1, 3, True))
+    ch.offer(cap(1, 4))
+    assert queued(ch) == [(1, 3), (1, 4)]
+    assert ch._queue[0].caption.final
+    assert ch.coalesced == 0
+
+
+def test_coalescing_off_by_default_appends_everything():
+    ch = ClientChannel(Recorder())
+    assert ch.coalescing is False
+    for c in [cap(1, 1), cap(1, 2), cap(1, 3, True)]:
+        ch.offer(c)
+    assert queued(ch) == [(1, 1), (1, 2), (1, 3)]
+    assert ch.coalesced == 0
+
+
+def test_sent_entry_is_not_coalesced_into():
+    async def main():
+        rec = Recorder()
+        ch = ClientChannel(rec)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert keys(rec.sent) == [(1, 1)]
+        ch.coalescing = True
+        ch.offer(cap(1, 2))
+        await drain(ch, task)
+        assert keys(rec.sent) == [(1, 1), (1, 2)]
+        assert ch.coalesced == 0
+
+    asyncio.run(main())
+
+
+def test_control_stays_first_with_coalescing():
+    async def main():
+        rec = Recorder()
+        ch = ClientChannel(rec)
+        ch.coalescing = True
+        ch.offer_control('{"type":"HISTORY","items":[]}')
+        for c in [cap(1, 1), cap(1, 2), cap(2, 1)]:
+            ch.offer(c)
+        task = asyncio.create_task(ch.run())
+        await drain(ch, task)
+        assert rec.sent[0]["type"] == "HISTORY"
+        assert keys(rec.sent) == [(1, 2), (2, 1)]
+
+    asyncio.run(main())

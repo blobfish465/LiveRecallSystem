@@ -14,9 +14,11 @@ Day-1 overload policy (deliberately simple; Day 2 extends it):
     finals it missed from the server's bounded HISTORY, so state stays bounded
     and nothing final is lost.
 
-Extension point for Day 2: `_enforce_bound()` and `offer()` are where
-lag-aware coalescing belongs (e.g. replacing a queued provisional of the same
-segment as soon as the client is behind, instead of waiting for the cap).
+Coalescing mode (Day 2, opt-in via `coalescing`, default off): while on, a new
+caption replaces the still-unsent queued provisional of the same segment in
+place (keeping its queue position) instead of being appended. Finals and
+control messages are never replaced. It is meant to be on only while the client
+is lagging; lag detection is wired up separately, so by default nothing changes.
 """
 
 from __future__ import annotations
@@ -50,11 +52,15 @@ class ClientChannel:
         self.max_pending = max_pending
         self._on_overflow = on_overflow
         self._queue: deque[Outgoing] = deque()
+        # segment -> its most recent still-queued entry (for coalescing).
+        self._latest: dict[int, Outgoing] = {}
+        self.coalescing = False
         self._wakeup = asyncio.Event()
         self.closed = False
         # Counters for logs, tests, and the report.
         self.sent = 0
         self.dropped = 0
+        self.coalesced = 0
         self.overflowed = False
 
     # ----------------------------------------------------------- producers
@@ -69,7 +75,17 @@ class ClientChannel:
         """Queue a caption update. Must not await (called from the source loop)."""
         if self.closed:
             return
-        self._queue.append(Outgoing(caption.wire, caption))
+        if self.coalescing:
+            entry = self._latest.get(caption.segment)
+            if entry is not None and entry.caption is not None and not entry.caption.final:
+                entry.wire = caption.wire
+                entry.caption = caption
+                self.coalesced += 1
+                self._wakeup.set()
+                return
+        entry = Outgoing(caption.wire, caption)
+        self._queue.append(entry)
+        self._latest[caption.segment] = entry
         if len(self._queue) > self.max_pending:
             self._enforce_bound()
         self._wakeup.set()
@@ -80,7 +96,9 @@ class ClientChannel:
             if victim is None:
                 self._overflow()
                 return
+            gone = self._queue[victim]
             del self._queue[victim]
+            self._forget(gone)
             self.dropped += 1
 
     def _oldest_superseded_provisional(self) -> int | None:
@@ -96,6 +114,11 @@ class ClientChannel:
                 candidate = i
             seen.add(cap.segment)
         return candidate
+
+    def _forget(self, item: Outgoing) -> None:
+        cap = item.caption
+        if cap is not None and self._latest.get(cap.segment) is item:
+            del self._latest[cap.segment]
 
     def _overflow(self) -> None:
         self.overflowed = True
@@ -113,6 +136,7 @@ class ClientChannel:
                     await self._wakeup.wait()
                     continue
                 item = self._queue.popleft()
+                self._forget(item)
                 await self._send(item.wire)
                 self.sent += 1
         except asyncio.CancelledError:
@@ -124,6 +148,7 @@ class ClientChannel:
     def close(self) -> None:
         self.closed = True
         self._queue.clear()
+        self._latest.clear()
         self._wakeup.set()
 
     @property
