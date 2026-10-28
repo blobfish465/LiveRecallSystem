@@ -188,7 +188,8 @@ def test_bad_hello_is_rejected_and_server_survives():
             await bad.send("garbage")
             with pytest.raises(websockets.exceptions.ConnectionClosed) as exc:
                 await bad.recv()
-            assert exc.value.rcvd.code == 1008
+            rcvd = exc.value.rcvd
+            assert rcvd is not None and rcvd.code == 1008
         async with websockets.connect(uri) as cl:
             await hello(cl)
             assert json.loads(await cl.recv())["type"] == "HISTORY"

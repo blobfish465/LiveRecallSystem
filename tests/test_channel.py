@@ -6,10 +6,12 @@ from liverecall.state import make_caption
 
 
 def cap(seg, rev, final=False):
-    return make_caption({
+    c = make_caption({
         "segment": seg, "revision": rev, "final": final,
         "source_ts": 1.0, "text": f"s{seg}r{rev}",
     }, 0.0)
+    assert c is not None  # test inputs are always valid
+    return c
 
 
 class Recorder:
@@ -68,13 +70,13 @@ def test_over_cap_drops_only_superseded_provisionals():
     for seg in range(1, 21):
         for rev in (1, 2, 3):
             ch.offer(cap(seg, rev, rev == 3))
-    queued = [o.caption for o in ch._queue]
-    assert len(queued) <= 25
+    caps = [o.caption for o in ch._queue if o.caption]
+    assert len(caps) <= 25
     assert not ch.overflowed
     # Finals are never dropped while the channel is open.
-    assert [c.segment for c in queued if c.final] == list(range(1, 21))
+    assert [c.segment for c in caps if c.final] == list(range(1, 21))
     # Only provisionals were dropped, and each had a newer item of its segment.
-    assert ch.dropped == 60 - len(queued) == 35
+    assert ch.dropped == 60 - len(caps) == 35
 
 
 def test_latest_provisional_of_active_segment_kept():
@@ -83,7 +85,7 @@ def test_latest_provisional_of_active_segment_kept():
     ch.offer(cap(2, 3, True))
     ch.offer(cap(3, 1))
     ch.offer(cap(3, 2))  # over cap -> drops (3,1), keeps newest (3,2)
-    assert [(o.caption.segment, o.caption.revision) for o in ch._queue] == [(1, 3), (2, 3), (3, 2)]
+    assert queued(ch) == [(1, 3), (2, 3), (3, 2)]
 
 
 def test_overflow_when_backlog_is_all_finals():
@@ -154,7 +156,8 @@ def test_coalescing_never_replaces_a_final():
     ch.offer(cap(1, 3, True))
     ch.offer(cap(1, 4))
     assert queued(ch) == [(1, 3), (1, 4)]
-    assert ch._queue[0].caption.final
+    first = ch._queue[0].caption
+    assert first is not None and first.final
     assert ch.coalesced == 0
 
 

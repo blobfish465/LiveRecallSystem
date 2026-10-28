@@ -91,7 +91,8 @@ def test_missing_fields_rejected():
 
 
 def test_integer_valued_float_segment_accepted():
-    assert make_caption(upd(2.0, 1.0), 0.0).segment == 2
+    c = make_caption(upd(2.0, 1.0), 0.0)
+    assert c is not None and c.segment == 2
 
 
 # ----------------------------------------------------------------- bounds
@@ -143,7 +144,8 @@ def test_fresh_join_gets_only_requested_window():
     segs = [c.segment for c in s.history_for(0, 0, 30)]
     assert segs == list(range(51, 81))
     assert len(s.history_for(0, 0, 999)) == 60  # clamped to 60 s
-    assert len(s.history_for(0, 0, "junk")) == 30  # invalid -> default 30
+    # Deliberately the wrong type: client hellos are untrusted JSON.
+    assert len(s.history_for(0, 0, "junk")) == 30  # type: ignore[arg-type]  # invalid -> default 30
     assert len(s.history_for(0, 0, None)) == 30
 
 
