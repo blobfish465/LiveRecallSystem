@@ -67,7 +67,27 @@ after every send). There is no pass/fail gate: the numbers go into `HANDOFF.md` 
 comparison. `tests/test_bandwidth_tool.py` covers the tc parsing and the rate maths; `tests/test_check.py` the server-log parsing and the gate rules shared with `check.py`. The policy fix this experiment calls for is handed to Day 4 (`HANDOFF.md`, Day 3). Always check `tc qdisc show dev lo`
 prints `noqueue` afterwards; `sudo ./network_profiles/reset.sh lo` if not.
 
-## 4. Manual checklist (browser, Day 3)
+## 4. Slow-then-fast convergence (Day 3; any OS, no root)
+
+```bash
+python convergence_test.py --runs 3                        # 100 normal + 10 converging clients, slow for 30 s of 120 s, before/after
+python convergence_test.py --slow-until 90 --duration 230  # slow longer than RECOVER_S (60 s): the relapse/backoff path
+```
+
+Runs our server and the public source with the public client code imported unmodified: the converging clients get a
+`slow` flag that turns false at the switch, so they pause 500 ms per message like T3's slow readers and then read at
+full speed. `analyse_results.analyse_file` gives the public metrics (the converging clients are its "slow" role); on
+top, per converging client relative to the switch: backlog at the switch, seconds until every message is fresh
+(≤ 500 ms), seconds until the first live provisional (= the server is back to full delivery), settled P95 and the
+provisional share of the last 30 s, and the drain time from the client's first read after the switch (the harness
+pauses *after* each message, so the first read can come up to 500 ms after the switch). Exit 1 when an "after" run
+(our server) has < 100% finals, duplicates, stale or connection errors, when a server is not ours / in the wrong mode,
+or when a converging client never got full delivery back (judged only when the fast phase exceeds `RECOVER_MAX_S` +
+10 s = 130 s). The plain-FIFO baseline's problems are printed, not failed. Result names carry every timing setting,
+and `--only` refuses to merge into a summary made with other settings. `tests/test_convergence_tool.py`
+covers the metric definitions. Results: `results/convergence_*` (gitignored); numbers in `HANDOFF.md`.
+
+## 5. Manual checklist (browser, Day 3)
 
 Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
 Firefox/geckodriver are missing, e.g. WSL2): in-place revision replacement and provisional/final styling,
@@ -87,5 +107,5 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 - [x] Day 2: t3 gated, with normal/slow P95 limits
 - [x] Day 3: bandwidth-test script + runs (section 3; results in `HANDOFF.md`)
 - [x] Day 3: `check.py --stress` (section 2; medians in `HANDOFF.md`)
-- [ ] Day 3: slow-then-fast convergence client
+- [x] Day 3: slow-then-fast convergence client (section 4)
 - [ ] Day 4: bandwidth policy fix + re-run section 3; T5 tc/netem x3; 5-minute memory run with `monitor_server.py`

@@ -22,6 +22,7 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 | `tests/` | pytest: `test_state.py`, `test_channel.py`, `test_server.py` (real sockets, in-process) |
 | `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first; `--stress` = 300/500-client scenarios; every row also shows the server's RSS + `[stats]` peaks |
 | `bandwidth_test.py` | Constrained-bandwidth experiment (needs `sudo tc`): before/after on a shaped loopback port, link + tbf + `[stats]` + RSS evidence |
+| `convergence_test.py` | Slow-then-fast clients (instructor's client code, imported): how fast freshness and full delivery return after a reader stops being slow, before/after |
 | `HANDOFF.md` / `TESTING.md` | Latest state + numbers / what's tested and how |
 | `results/` | Harness output (gitignored) |
 
@@ -73,7 +74,7 @@ python check.py              # ~3 min; must print "GATE PASSED" and timer drift 
 |---|---|---|---|
 | 1 ✅ | lihloway | **DONE.** Repo hygiene, server state + bounded history, `HISTORY`/resume/late join, `ClientChannel` skeleton (bounded, never drops finals), `tests/` + `check.py` + `TESTING.md` stubs, naive-baseline numbers | `submission_check.py` passes; T1/T2/T4/late-join: 100% final completeness, 0 duplicates, 0 stale; `HANDOFF.md` written |
 | 2 ✅ | muhdbhz | **DONE** (`--no-coalesce` is the before/after flag). **Backpressure**: lag detection, provisional coalescing, constrained-bandwidth policy, `--naive` flag for before/after, channel unit tests, T3 gate. Start with the "Key finding" in `HANDOFF.md` (backlog sits in socket buffers, not our queue) | T3 gated in `check.py`: normal clients fresh, slow clients 100% finals, memory flat; earlier gates still green |
-| 3 | TBD | **Browser client** (in-place revisions, provisional/final styling, ≥60 s local history, recall 30 s default + 15/30/60, auto-reconnect with finalized resume state, HISTORY dedup, configurable WS URL via query string) + **test tooling** (slow-then-fast convergence client, `check.py --stress` with 300–500 clients, bandwidth-test script). Finish any leftover Day 2 work | Manual browser checklist ticked; new tools run; earlier gates green |
+| 3 ✅ | QiAn | **DONE** (lag-policy fixes for slow links and post-overload recovery handed to Day 4, see `HANDOFF.md`). **Browser client** (in-place revisions, provisional/final styling, ≥60 s local history, recall 30 s default + 15/30/60, auto-reconnect with finalized resume state, HISTORY dedup, configurable WS URL via query string) + **test tooling** (slow-then-fast convergence client, `check.py --stress` with 300–500 clients, bandwidth-test script). Finish any leftover Day 2 work | Manual browser checklist ticked; new tools run; earlier gates green |
 | 4 | TBD | Ubuntu VM + tc/netem; T1–T5 × 3 runs (median); bandwidth + stress + 5-min memory runs; before/after comparison; charts; README; report draft | Results + charts committed; README reproducible from a fresh clone |
 | Meet-up | All | Integration fixes, demo video (5–7 min), `AI_USAGE.md`, `CONTRIBUTIONS.md`, final report, `submission_check.py --final`, viva walkthrough of each other's code | Submitted |
 
@@ -92,7 +93,7 @@ Coverage checklist (spec gaps that public tests don't exercise — make sure eac
 - [~] Constrained bandwidth: `bandwidth_test.py` (Day 3; 500 clients, the profile's shaper on the server port) shows the Day 2 lag policy **loses to plain FIFO on a 2 Mbit/s link**. Policy fix handed to Day 4 (`HANDOFF.md`, Day 3). 100 clients never saturate the link (≈ 0.6 Mbit/s)
 - [x] Scale beyond 100 clients: `check.py --stress` (300 / 500 / 500 + 10% slow; Day 3)
 - [~] Bursty / faster revisions and variable revision counts: 1/2/3/8 revisions unit-tested (Day 1); bursty source rate still untested
-- [ ] Rapid convergence after overload ends (slow-then-fast client). Day 3
+- [~] Rapid convergence after overload ends: `convergence_test.py` (Day 3). Freshness returns at once, but the lag-aware server restores full delivery only 45 s (120 s after a relapse) after the client speeds up. Fix handed to Day 4 (`HANDOFF.md`, Day 3)
 - [~] Long-run boundedness: 1-hour simulation unit-tested for server history (Day 1); 5-min real run with `monitor_server.py` still needed. Day 4
 - [x] Robustness: unknown fields, `SOURCE_DONE`, malformed JSON, bad hello, abrupt client drop (`tests/test_server.py`, Day 1)
 - [ ] Browser: "What did I miss?" uses local state only; connection state visible; works when browser and server are on different hosts. Day 3

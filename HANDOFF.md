@@ -255,16 +255,17 @@ The slow-then-fast convergence client (checks recovery to full delivery, needs >
 
 ## Day 3 — QiAn — browser client, constrained bandwidth, stress gate
 
-### Status: IN PROGRESS (steps 1–3 of 4 done)
+### Status: DONE (steps 1–4 of 4)
 
-`pytest` (89 tests: 63 + 6 browser + 5 bandwidth-tool + 15 check) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
+`pytest` (101 tests: 63 + 6 browser + 5 bandwidth-tool + 15 check + 12 convergence-tool) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
 
 Done:
 - **Browser client** (commit 14bfd92): `client/store.js` mirrors the server's revision rules (final durable, never older after newer, duplicate/stale rejected, bounded by 120 s of lecture time and 600 segments); `client/app.js` updates one row per segment in place, styles provisional/final, "What did I miss?" 30 s default + 15/30/60 from local state only, auto-reconnect with backoff resuming from the latest *final*, HISTORY merged through the same rule (no duplicates), late join, server+source restart detection, 30 s stall watchdog, demo drop button, `?ws=` for a server on another host. 6 end-to-end tests in headless Firefox (`tests/test_client.py`, skipped where Firefox is missing).
 - **Constrained-bandwidth experiment** (`bandwidth_test.py`, this section): the Day 2 policy is **worse than a plain FIFO on a slow link**. Details below; the policy fix is **handed to Day 4** (team decision, 29 Oct).
 - **Stress gate** (`check.py --stress`, this section): 300 and 500 clients, and 500 clients with 10% slow readers, all pass the full gate on this VM; `check.py` now also reports the server's RSS and `[stats]` peaks for every run.
+- **Slow-then-fast convergence** (`convergence_test.py`, this section): freshness comes back at once in both configurations (the backlog drains in < 10 ms), but the lag-aware server keeps a recovered client on finals-only for **45 s** after it speeds up (**120 s** after a relapse), where the plain FIFO restores full delivery at once. A second policy issue, handed to Day 4 with the bandwidth fix.
 
-Not done yet: slow-then-fast convergence client (step 4), the "Numbers today" block (end of day).
+Not done / handed on: the bandwidth policy fix (Day 4, below); T5 x3 (Day 4).
 
 ### Constrained bandwidth: result
 
@@ -330,6 +331,52 @@ is exactly T3's: normal clients unaffected (P95 45 ms), slow clients at the clie
 finals, `max_pending` 1, no hopeless closes, RSS flat. The slow readers lower the overall Normal Update Coverage
 (95%) by design: their provisionals are coalesced.
 
+### Convergence: `convergence_test.py` (slow-then-fast clients)
+
+`python convergence_test.py --runs 3` (and `--slow-until 90 --duration 230` for the relapse case). Our server and
+the public source, with the **public client code imported unmodified** (`load_clients.simulated_client`): 100 normal
+clients plus 10 "converging" clients whose `slow` flag is an object that turns false at the switch, so they read like
+T3's slow readers (500 ms pause per message) for 30 s and at full speed afterwards. The public metrics come from
+`analyse_results.analyse_file`; the tool adds per-client measurements relative to the switch (see its docstring).
+
+| 100 + 10 converging, slow 30 s of 120 s, median of 3 | plain FIFO (before) | lag-aware (after) |
+|---|---:|---:|
+| final completeness / duplicates / stale | 100% / 0 / 0 | 100% / 0 / 0 |
+| normal clients P95 | 11 ms | 14 ms |
+| converging, slow phase P95 | 13.6 s | **9.1 s** |
+| backlog at the switch (age of the first caption read after it) | 14.6 s | **4.5 s** |
+| fresh again after the switch (drain from the first read) | 0.25 s (0.008 s) | 0.24 s (0.000 s) |
+| **full delivery (every revision) again after the switch** | **0.2 s** | **45.3 s** |
+| settled P95 (switch + 10 s to the end) | 10 ms | 12 ms |
+| normal update coverage, all clients | 100% | 96.7% |
+| lag entries / provisionals coalesced / hopeless closes | 0 / 0 / 0 | 10 / 1700 / 0 |
+
+Slow for 90 s of 230 s (1 run): FIFO slow-phase P95 41.9 s, backlog at the switch 44.3 s, and all 10 converging
+clients were disconnected (`ConnectionClosedError`; no overflow line in the server log, so the WebSocket keepalive
+closed them) and recovered 53 finals each via HISTORY: still 100% finals. Lag-aware: slow-phase P95 8.6 s, backlog
+7.7 s, no disconnects, but **full delivery returned only 119.9 s after the switch** (coverage 95.0%).
+
+What this shows:
+- **Freshness converges immediately in both.** The "fresh after" ~0.25 s is the harness client finishing its last
+  500 ms pause (it pauses *after* each message); from its first read the backlog drains in under 10 ms. Once the reader
+  is fast, TCP and the client library empty any backlog at loopback speed, so the policy cannot do much better here.
+- **The lag-aware server's gain is during overload**: fresher captions while slow (P95 9 s vs 14 s over 30 s; 9 s vs
+  42 s over 90 s, where the FIFO's backlog grows without limit), no disconnects. This is the T3 result, and it holds.
+- **Its cost is after overload: full delivery comes back late.** In finals-only mode a 500 ms reader keeps up
+  (2 reads/s vs 1.33 finals/s), so its pongs turn fast within seconds of entering lag; lag mode then ends `RECOVER_S`
+  (60 s) after that, i.e. ~45 s after the switch here, *regardless of when the client actually sped up*. When the
+  slow phase outlasts that 60 s (the 90 s case), the server tries full delivery while the client is still slow,
+  relapses, doubles the wait to `RECOVER_MAX_S` (120 s), and the now-fast client waits ~2 minutes for provisionals.
+  The spec asks for a return to full delivery "when the client catches up"; Normal Update Coverage pays for the delay.
+
+**Proposed fix, for Day 4 together with the bandwidth one** (same file, `liverecall/channel.py`; same validation:
+`check.py` T3 limits, then `convergence_test.py --runs 3` and the 230 s case): the pong in finals-only mode only says
+"keeps up with finals", not "keeps up with everything". Probe full delivery cheaply instead of waiting a fixed 60 s:
+e.g. every ~10 s in lag mode send the queued provisionals of *one* segment and check that the pong stays fast;
+leave lag after a few such probes pass, and do not double the wait when the relapse was caught by a probe (it only
+cost one segment's provisionals). The Day 2 measurement (shorter `RECOVER_S` lost finals in T3 because each failed
+retry refilled the read-ahead) is why the probe has to be small, not why the wait has to be long.
+
 ### Numbers today (median of 3), Mininet lab VM (Ubuntu, 4 vCPU), timer drift +1%
 
 From `python check.py --runs 3` (quick durations: unmodified `run_demo.py`, shorter than PUBLIC_TESTS.md) and `python check.py --stress --runs 3`; every one of the 24 runs passed its gate.
@@ -344,12 +391,13 @@ From `python check.py --runs 3` (quick durations: unmodified `run_demo.py`, shor
 ### Interface / files for the next steps
 
 - `bandwidth_test.py --apply|--unlimited --clients N --duration S --runs R [--only before|after] [--burst B] [--tag T]`; results in `results/bandwidth_<mode><tag>_c<N>_<config>_runNN.{csv,json,log}` + `..._summary.json`. Needs `sudo tc` (passwordless on this VM: `/etc/sudoers.d/liverecall-tc`).
+- `convergence_test.py [--clients N] [--converging K] [--slow-ms 500] [--slow-until 30] [--duration 120] [--runs R] [--only before|after] [--tag T]`; results `results/convergence<tag>_c<N>_k<K>_s<slow-until>_d<duration>_m<slow-ms>_<config>_runNN.{csv,json,log}` + `_summary.json`. Imports `load_clients.simulated_client`, `run_demo` helpers and `analyse_results.analyse_file` from the unmodified harness.
 - `check.py --stress [--runs 3] [--full]`; `--only s500` etc. also works. `server_pid`, `rss_mb`, `parse_stats`, `server_listened` live in `check.py` and are imported by `bandwidth_test.py`. Each scenario's harness + server output is in `results/check_<name>.log`.
 - The browser client's interface is the protocol only; `window.liverecall` exposes `store`, `counters`, `dropConnection()` for tests and the console.
 
 ## Day 4 — TBD
 
 To pick up (in this order):
-1. **Bandwidth policy fix** (see Day 3, "Proposed fix, handed to Day 4"): ping budget, no stop-and-wait in lag mode, rarer probes; keep `check.py` green (T3 limits), then `bandwidth_test.py --apply --clients 500 --runs 3` before/after.
+1. **Two lag-policy fixes in `liverecall/channel.py`** (Day 3, "Proposed fix" under bandwidth and under convergence): (a) on a slow *link*: ping budget, no stop-and-wait in lag mode, rarer probes; (b) after overload: probe full delivery with one segment's provisionals instead of waiting a fixed 60/120 s. Keep `check.py` green (T3 limits), then re-run `bandwidth_test.py --apply --clients 500 --runs 3` and `convergence_test.py --runs 3` (+ `--slow-until 90 --duration 230`) and put the before/after tables in the report.
 2. T1–T5 x3 on one VM with timer drift < 10% (`check.py --full --runs 3` for T1–T4 + late join; T5 with `network_profiles/` + `run_demo.py --runs 3`), `check.py --stress --runs 3`, 5-minute memory run with `monitor_server.py`.
 3. Charts, README, report draft.
