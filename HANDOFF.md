@@ -255,7 +255,7 @@ The slow-then-fast convergence client (checks recovery to full delivery, needs >
 
 ## Day 3 — QiAn — browser client, constrained bandwidth, stress gate
 
-### Status: DONE (steps 1–4 of 4)
+### Status: DONE 
 
 `pytest` (101 tests: 63 + 6 browser + 5 bandwidth-tool + 15 check + 12 convergence-tool) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
 
