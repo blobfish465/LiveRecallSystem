@@ -253,17 +253,18 @@ The slow-then-fast convergence client (checks recovery to full delivery, needs >
 - Before/after table above; the 10/30/60 s recovery and 10/30 s hopeless measurements as design evidence.
 - Trade-offs: +4–5 ms normal P95; 8 s floor; hopeless-client connection errors.
 
-## Day 3 — QiAn — browser client, constrained bandwidth
+## Day 3 — QiAn — browser client, constrained bandwidth, stress gate
 
-### Status: IN PROGRESS (steps 1–2 of 4 done)
+### Status: IN PROGRESS (steps 1–3 of 4 done)
 
-`pytest` (75 tests: 63 + 6 browser + 6 bandwidth-tool) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
+`pytest` (89 tests: 63 + 6 browser + 5 bandwidth-tool + 15 check) passes on the Mininet lab VM (Ubuntu, 4 vCPU, Python 3.12 venv, timer drift +1%).
 
 Done:
 - **Browser client** (commit 14bfd92): `client/store.js` mirrors the server's revision rules (final durable, never older after newer, duplicate/stale rejected, bounded by 120 s of lecture time and 600 segments); `client/app.js` updates one row per segment in place, styles provisional/final, "What did I miss?" 30 s default + 15/30/60 from local state only, auto-reconnect with backoff resuming from the latest *final*, HISTORY merged through the same rule (no duplicates), late join, server+source restart detection, 30 s stall watchdog, demo drop button, `?ws=` for a server on another host. 6 end-to-end tests in headless Firefox (`tests/test_client.py`, skipped where Firefox is missing).
-- **Constrained-bandwidth experiment** (`bandwidth_test.py`, this section): the Day 2 policy is **worse than a plain FIFO on a slow link**. Details and a proposed fix below.
+- **Constrained-bandwidth experiment** (`bandwidth_test.py`, this section): the Day 2 policy is **worse than a plain FIFO on a slow link**. Details below; the policy fix is **handed to Day 4** (team decision, 29 Oct).
+- **Stress gate** (`check.py --stress`, this section): 300 and 500 clients, and 500 clients with 10% slow readers, all pass the full gate on this VM; `check.py` now also reports the server's RSS and `[stats]` peaks for every run.
 
-Not done yet: `check.py --stress` (300–500 clients), slow-then-fast convergence client, the "Numbers today" block (end of day).
+Not done yet: slow-then-fast convergence client (step 4), the "Numbers today" block (end of day).
 
 ### Constrained bandwidth: result
 
@@ -291,7 +292,7 @@ Demand with no limit (30 s, 1 run, peak over 5 s): 300 clients: FIFO 1.8 Mbit/s,
 
 **Conclusion:** the pong-based lag policy was designed for a slow *reader* (T3: the client stops reading; the link is fine). On a slow *link* it (1) adds ~90% control traffic, (2) caps throughput at one message per RTT, (3) closes clients that are merely queued. A plain FIFO + TCP does better on every graded metric, so the 6-mark "constrained bandwidth" challenge is currently lost against our own baseline. Reported as is; not hidden.
 
-**Proposed fix** (not implemented on Day 3; needs T3 re-validation with `check.py` + the x3 medians):
+**Proposed fix, handed to Day 4** (decision 29 Oct: Day 3 moved on to the stress and convergence tooling). Whoever takes it: prototype in `liverecall/channel.py` behind the existing tests, re-run `check.py` (the T3 limits) and `python bandwidth_test.py --apply --clients 500 --duration 60 --runs 3`, and keep whichever policy wins on the graded metrics; if the fix is not done, the report states the finding as it stands here.
 1. **Ping budget:** at most one ping per client per ~1 s instead of one per send. T3 detection still works: a stalled reader's pong is late by seconds, not by one RTT.
 2. **No stop-and-wait:** while lagging, send finals as they arrive (1.33/s) and keep coalescing provisionals; keep one ping outstanding only as the lag *measurement*. Finals-only traffic at 500 clients is ~1 Mbit/s, under the cap, so caption age should drop to tens of ms with 100% completeness, i.e. clearly better than the FIFO's 1.6 s P95.
 3. Probe pings in lag mode every ~5 s instead of every `LAG_S` (500 lagging clients × 1 probe/s ≈ 0.5 Mbit/s today).
@@ -299,9 +300,56 @@ Demand with no limit (30 s, 1 run, peak over 5 s): 300 clients: FIFO 1.8 Mbit/s,
 
 Methodology notes for the report: shaping only the server port is the public profile with a classifier in front (same rate/burst/latency); sch_tbf drops any packet larger than its burst, and loopback's MTU is 65536, so a single message over 4000 B stalls its connection for ever (a 2 MB probe transfer: 0 B received, 67 drops; with burst 66536: 1.84 Mbit/s). The caption stream never builds such segments (per-connection backlog is a few hundred bytes), but a large uncompressed HISTORY would; keep history replies small or use `--burst 66536` when that matters. Link Mbit/s counts every byte through `lo` in both directions (captions, pings/pongs, ACKs, handshakes); "peak 5 s" is the highest 5 s average, because tbf lets short bursts through. tbf counters and the `[stats]` peaks come from `tc -s qdisc` and the server log of each run.
 
+### Stress: `check.py --stress` (300 / 500 clients)
+
+`python check.py --stress [--runs 3]` runs three opt-in scenarios through the unmodified harness and applies the
+full gate to each: `s300` (300 clients, 40 s), `s500` (500 clients) and `s500slow` (500 clients, 10% slow readers at
+500 ms/msg, i.e. T3 at 5x scale). Gates: 100% finals, 0 duplicates / stale / non-final HISTORY / connection errors,
+coverage >= 99% (s300, s500), normal P95 <= 100 ms (s300) / 150 ms (s500, s500slow), slow P95 <= 15 s, and the
+server's peak RSS <= 200 MB. `check.py` now also captures `run_demo.py`'s output per scenario to
+`results/check_<name>.log`, samples the server's RSS every 0.5 s and reads its `[stats]` lines, so every table row
+shows the server side (RSS max, lagging peak, `max_pending`, coalesced, hopeless closes), and a run is rejected
+when our server never printed its `listening` line (a stale server on the port would otherwise be measured).
+
+| median of 3 runs, 40 s, Mininet VM (drift +1%) | s300 | s500 | s500slow |
+|---|---:|---:|---:|
+| final completeness % | 100.0 | 100.0 | 100.0 |
+| normal update coverage % | 100.0 | 100.0 | 95.1 |
+| P50 / P95 / P99 caption age, all clients (ms) | 19.2 / 30.6 / 33.3 | 26.3 / 41.7 / 46.0 | 26.4 / 839.6 / 7899.5 |
+| normal-client P95 / slow-client P95 (ms) | n/a | n/a | 40.0 / 9162.7 |
+| duplicates / stale / hopeless closes | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| server RSS max (MB) | 44.9 | 58.6 | 58.5 |
+| lagging clients, peak | 0 | 0 | 50 |
+| max_pending, peak | 0 | 0 | 1 |
+| provisionals coalesced | 0 | 0 | 3600 |
+
+Why 500 and not more: one `load_clients.py` process reads for all clients on one core; at 500 it is the harness, not
+the server, that sits near a core's limit (the server's P95 grows only from 31 ms at 300 to 43 ms at 500 clients, RSS
+from 45 to 59 MB). Beyond that the numbers measure the load generator. At 500 clients with 50 slow readers the picture
+is exactly T3's: normal clients unaffected (P95 45 ms), slow clients at the client library's 9 s read-ahead floor, 100%
+finals, `max_pending` 1, no hopeless closes, RSS flat. The slow readers lower the overall Normal Update Coverage
+(95%) by design: their provisionals are coalesced.
+
+### Numbers today (median of 3), Mininet lab VM (Ubuntu, 4 vCPU), timer drift +1%
+
+From `python check.py --runs 3` (quick durations: unmodified `run_demo.py`, shorter than PUBLIC_TESTS.md) and `python check.py --stress --runs 3`; every one of the 24 runs passed its gate.
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%, P50 3.9 ms, P95 6.1 ms, server RSS 26.0 MB
+- T2 (100 clients):  P50 8.3 ms, P95 15.0 ms, P99 16.6 ms, completeness 100%, coverage 100%, RSS 31.4 MB
+- T3 (10% slow):     normal P95 14.2 ms, slow P95 9102.3 ms, completeness 100%, coverage 95.1%, coalesced 720, max_pending 1, hopeless closes 0
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, coverage 96.3%, recovery P50 3.4 ms, P95 4.0 ms
+- late join (20%):   dup 0, stale 0, completeness 100%, recovery P50 0.6 ms
+- stress s300 / s500 / s500slow: see the table above (P95 30.6 / 41.7 / normal 40.0 ms, RSS 44.9 / 58.6 / 58.5 MB)
+- T5 (impairment profiles): not run on Day 3 (Day 4, x3 with `network_profiles/`)
+
 ### Interface / files for the next steps
 
 - `bandwidth_test.py --apply|--unlimited --clients N --duration S --runs R [--only before|after] [--burst B] [--tag T]`; results in `results/bandwidth_<mode><tag>_c<N>_<config>_runNN.{csv,json,log}` + `..._summary.json`. Needs `sudo tc` (passwordless on this VM: `/etc/sudoers.d/liverecall-tc`).
+- `check.py --stress [--runs 3] [--full]`; `--only s500` etc. also works. `server_pid`, `rss_mb`, `parse_stats`, `server_listened` live in `check.py` and are imported by `bandwidth_test.py`. Each scenario's harness + server output is in `results/check_<name>.log`.
 - The browser client's interface is the protocol only; `window.liverecall` exposes `store`, `counters`, `dropConnection()` for tests and the console.
 
 ## Day 4 — TBD
+
+To pick up (in this order):
+1. **Bandwidth policy fix** (see Day 3, "Proposed fix, handed to Day 4"): ping budget, no stop-and-wait in lag mode, rarer probes; keep `check.py` green (T3 limits), then `bandwidth_test.py --apply --clients 500 --runs 3` before/after.
+2. T1–T5 x3 on one VM with timer drift < 10% (`check.py --full --runs 3` for T1–T4 + late join; T5 with `network_profiles/` + `run_demo.py --runs 3`), `check.py --stress --runs 3`, 5-minute memory run with `monitor_server.py`.
+3. Charts, README, report draft.

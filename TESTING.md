@@ -28,11 +28,14 @@ python -m pytest -q
 python check.py            # quick (~3 min)
 python check.py --full     # PUBLIC_TESTS.md durations
 python check.py --only t3  # one scenario
+python check.py --stress   # 300/500-client scenarios (~2 min), not part of the default gate
 ```
 
 `check.py` first prints `asyncio timer drift`. If it warns (> +10%), **stop**: this machine's timers are unreliable (typically VirtualBox on a Hyper-V host) and every metric will be wrong. See "Test environments" in `HANDOFF.md`.
 
-Gates for every scenario: final completeness 100%, duplicates 0, stale 0, non-final HISTORY items 0, connection errors 0. T1/T2 also need Normal Update Coverage ≥ 99%. T3 also needs normal-client P95 ≤ 100 ms and slow-client P95 ≤ 15 s (measured ~10 ms / ~9 s; the `--no-coalesce` baseline gives ~28 s and 95% finals).
+Gates for every scenario: final completeness 100%, duplicates 0, stale 0, non-final HISTORY items 0, connection errors 0. T1/T2 also need Normal Update Coverage ≥ 99%. T3 also needs normal-client P95 ≤ 100 ms and slow-client P95 ≤ 15 s (measured ~10 ms / ~9 s; the `--no-coalesce` baseline gives ~28 s and 95% finals). Every run must also contain our server's `listening` line (a stale server on the port would otherwise be measured). Each scenario's harness + server output is kept in `results/check_<scenario>.log`; the table shows the server's peak RSS and `[stats]` peaks per run.
+
+Stress scenarios (`--stress`, Day 3) add a server RSS ceiling of 200 MB and P95 limits of ~3x what the Mininet VM measured (results in `HANDOFF.md`).
 
 | Scenario | Quick params | Added by |
 |---|---|---|
@@ -41,6 +44,9 @@ Gates for every scenario: final completeness 100%, duplicates 0, stale 0, non-fi
 | t3 | 100 clients, 10% slow @ 500 ms, 40 s (gated + P95 limits) | Day 1 (gated Day 2) |
 | t4 | 100 clients, 20% disconnect @ 10 s for 5 s, 30 s | Day 1 |
 | late | 100 clients, 20% join after 8 s, 25 s | Day 1 |
+| s300 | `--stress`: 300 clients, 40 s; P95 ≤ 100 ms, RSS ≤ 200 MB | Day 3 |
+| s500 | `--stress`: 500 clients, 40 s; P95 ≤ 150 ms, RSS ≤ 200 MB | Day 3 |
+| s500slow | `--stress`: 500 clients, 10% slow @ 500 ms, 40 s; normal P95 ≤ 150 ms, slow P95 ≤ 15 s, RSS ≤ 200 MB | Day 3 |
 
 ## 3. Constrained bandwidth (Day 3; Ubuntu, needs `sudo tc`)
 
@@ -58,7 +64,7 @@ coalesced provisionals, hopeless closes, `max_pending`) and its RSS. Files: `res
 Pick the client count from the demand run: 100 clients need ~0.6 Mbit/s and never saturate the 2 Mbit/s link;
 **500 clients** put both configurations over it (plain FIFO ~2.9 Mbit/s, lag-aware ~5.4 Mbit/s, because it pings
 after every send). There is no pass/fail gate: the numbers go into `HANDOFF.md` and the report's before/after
-comparison. `tests/test_bandwidth_tool.py` covers the parsing and the rate maths. Always check `tc qdisc show dev lo`
+comparison. `tests/test_bandwidth_tool.py` covers the tc parsing and the rate maths; `tests/test_check.py` the server-log parsing and the gate rules shared with `check.py`. The policy fix this experiment calls for is handed to Day 4 (`HANDOFF.md`, Day 3). Always check `tc qdisc show dev lo`
 prints `noqueue` afterwards; `sudo ./network_profiles/reset.sh lo` if not.
 
 ## 4. Manual checklist (browser, Day 3)
@@ -80,5 +86,6 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 
 - [x] Day 2: t3 gated, with normal/slow P95 limits
 - [x] Day 3: bandwidth-test script + runs (section 3; results in `HANDOFF.md`)
-- [ ] Day 3: `check.py --stress` (300–500 clients), slow-then-fast convergence client
-- [ ] Day 4: T5 tc/netem, 5-minute memory run with `monitor_server.py`
+- [x] Day 3: `check.py --stress` (section 2; medians in `HANDOFF.md`)
+- [ ] Day 3: slow-then-fast convergence client
+- [ ] Day 4: bandwidth policy fix + re-run section 3; T5 tc/netem x3; 5-minute memory run with `monitor_server.py`

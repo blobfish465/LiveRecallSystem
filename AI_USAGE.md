@@ -27,10 +27,10 @@
   4. A review of its own lag-mode change found that provisionals queued *before* lag could be sent after their final (stale). Fixed with `_compact()` on lag entry, plus a test.
 - **What I checked myself:** TODO (muhdbhz: fill in what you read/verified so you can defend it in the viva).
 
-### Day 3 (QiAn) — browser client, constrained-bandwidth experiment
+### Day 3 (QiAn) — browser client, constrained-bandwidth experiment, stress gate
 
 - **Tool:** Claude Code (Claude Opus 5.5, then Fable 5.1), with reviewer and skeptic sub-agents on each step.
-- **Used for:** explaining the Day 1–2 code and the metrics in plain words, the browser client (`client/store.js`, `client/app.js`) and its headless-Firefox tests, `bandwidth_test.py`, running the bandwidth experiments and reading the CSVs, drafting the handoff.
+- **Used for:** explaining the Day 1–2 code and the metrics in plain words, the browser client (`client/store.js`, `client/app.js`) and its headless-Firefox tests, `bandwidth_test.py`, running the bandwidth experiments and reading the CSVs, `check.py --stress` (300/500-client scenarios, server RSS and `[stats]` per run), drafting the handoff. Each step's code was checked by a review workflow (independent reviewers per concern, each finding re-checked by three skeptics) before I reviewed it myself.
 - **Useful suggestions:**
   1. Measure the link *demand* before choosing the client count. Day 1's estimate suggested ~300 clients; the demand run showed the plain-FIFO baseline still fits at 300 and only the lag-aware server exceeds the cap (its ping after every send doubles its traffic), so 500 is the first fair load.
   2. Shape only the server port rather than all of `lo`: this VS Code session's SSH tunnel also runs over `lo` and would have been throttled, possibly killing the session mid-experiment.
@@ -40,7 +40,12 @@
   2. The experiment was framed to *demonstrate* that the Day 2 policy beats a plain queue under constrained bandwidth. The data said the opposite (plain FIFO 100% complete / P95 1.6 s vs 94.3% / 9.3 s at 500 clients). The handoff reports it as a design finding with a proposed fix instead of tuning the setup until it looked good.
   3. Its first restart detection in the browser store reset on a live update at or below the newest final, but when that update was itself a *final* the page resumed after it and skipped the new run's earlier finals. A skeptic pass found it; fixed with a second reset in `applyUpdate` plus a test that fails without it.
   4. Its sampler thread shadowed `threading.Thread._stop` with an `Event` named `_stop`, so `join()` crashed; caught on the first smoke test.
-- **What I checked myself:** TODO (QiAn: fill in what you read/verified so you can defend it in the viva).
+  5. Its first stress gate scanned `/proc` without a guard, so on Windows/macOS the RSS sampler thread would die with a traceback and `--stress` would fail with "RSS max n/a", which reads like a memory problem. The review caught it; now the PID lookup returns nothing there and the gate says the RSS needs Linux. The same review found that the server's `[stats]` lines can be glued to another process's output in the shared log (one real log line read `source disconnectedSOURCE_DONE: ...`), so the parser now searches for `[stats` anywhere in the line. It also proposed 21 other findings that its own skeptics refuted (e.g. that the PID order could map RSS to the wrong run: each run's server exits before the next starts).
+- **What I checked myself:**
+  1. Nothing was committed by the assistant. For each step I had the changes explained file by file in plain words, asked follow-ups until I could explain them without the chat (why the store treats HISTORY and live updates with one rule, why the resume cursor is the latest *final* and not the latest revision, why restart detection needs a second reset, why the lag policy pings after every send), then read the diff and committed and pushed it under my own name.
+  2. Before accepting the bandwidth result I checked the environment first, as `CLAUDE.md` requires: this VM is the team's reference Mininet VM, `check.py`'s timer drift is +1%, the shaping was applied to the server port only and `tc qdisc show dev lo` was back to `noqueue` after every run. I also checked that the "before" and "after" logs really ran in the modes they claim (the baseline line appears in every plain-FIFO log and in no lag-aware log); that check is now built into the script.
+  3. I re-read the assignment's mandatory public tests against our state rather than taking the assistant's summary: T1–T4 are gated in `check.py`, T5 has only one WSL2 run, so Day 4 must re-run T1–T5 three times on one VM with valid timers, using the scripted tools rather than hand-typed `tc` commands, so that the report's numbers are reproducible and consistent across teammates.
+  4. Decisions that were mine, not the tool's: the scope of the passwordless `sudo` rule (`/usr/sbin/tc` only, on this VM only); reporting the constrained-bandwidth loss honestly as a finding instead of re-tuning the experiment; and keeping the browser client's recall purely local (no request to the server), as the spec requires.
 
 ## Tools used
 

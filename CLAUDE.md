@@ -20,7 +20,7 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 | `liverecall/state.py` | `CaptionState`: revision rules, bounded history, `history_for()` → HISTORY selection. Pure logic, no I/O |
 | `liverecall/channel.py` | `ClientChannel`: per-client bounded queue + sender task. **Backpressure/overload policy goes here** |
 | `tests/` | pytest: `test_state.py`, `test_channel.py`, `test_server.py` (real sockets, in-process) |
-| `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first |
+| `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first; `--stress` = 300/500-client scenarios; every row also shows the server's RSS + `[stats]` peaks |
 | `bandwidth_test.py` | Constrained-bandwidth experiment (needs `sudo tc`): before/after on a shaped loopback port, link + tbf + `[stats]` + RSS evidence |
 | `HANDOFF.md` / `TESTING.md` | Latest state + numbers / what's tested and how |
 | `results/` | Harness output (gitignored) |
@@ -89,8 +89,8 @@ Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — W
 4. Required thresholds for every gate scenario: final completeness 100%, duplicates 0, stale 0; coverage ≈100% when no clients are slow/disconnected.
 
 Coverage checklist (spec gaps that public tests don't exercise — make sure each has an owner and a test):
-- [ ] Constrained bandwidth (`network_profiles/bandwidth_2mbit.sh`). Ran once on Day 1: **100 clients don't saturate 2 Mbit/s** (stream ≈ 0.6 Mbit/s), so use ~300+ clients or a lower rate. Day 2/3
-- [ ] Scale beyond 100 clients: `check.py --stress`. Day 3
+- [~] Constrained bandwidth: `bandwidth_test.py` (Day 3; 500 clients, the profile's shaper on the server port) shows the Day 2 lag policy **loses to plain FIFO on a 2 Mbit/s link**. Policy fix handed to Day 4 (`HANDOFF.md`, Day 3). 100 clients never saturate the link (≈ 0.6 Mbit/s)
+- [x] Scale beyond 100 clients: `check.py --stress` (300 / 500 / 500 + 10% slow; Day 3)
 - [~] Bursty / faster revisions and variable revision counts: 1/2/3/8 revisions unit-tested (Day 1); bursty source rate still untested
 - [ ] Rapid convergence after overload ends (slow-then-fast client). Day 3
 - [~] Long-run boundedness: 1-hour simulation unit-tested for server history (Day 1); 5-min real run with `monitor_server.py` still needed. Day 4

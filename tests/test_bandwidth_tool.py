@@ -1,4 +1,5 @@
-"""Pure parts of bandwidth_test.py (the experiment itself needs tc and root, see TESTING.md)."""
+"""Pure parts of bandwidth_test.py (the experiment itself needs tc and root, see TESTING.md).
+The server-log parsing it shares with check.py is tested in test_check.py."""
 
 import bandwidth_test as bt
 
@@ -30,38 +31,6 @@ def test_link_rates_average_and_sustained_peak():
 
 def test_link_rates_need_two_samples():
     assert bt.link_rates([(0.0, 0)]) == {}
-
-
-def test_stats_lines_give_peaks_and_final_totals(tmp_path):
-    log = tmp_path / "run.log"
-    log.write_text(
-        "LiveRecall server listening on ws://0.0.0.0:8791\n"
-        "[stats 21:39:36] clients=500 lagging=490 history=10 active=0 max_pending=5 "
-        "coalesced_total=7470 lag_entries_total=490 hopeless_closes_total=0\n"
-        "client overflow, closing: id=7\n"
-        "[stats 21:39:46] clients=499 lagging=300 history=23 active=0 max_pending=2 "
-        "coalesced_total=20210 lag_entries_total=490 hopeless_closes_total=1\n"
-    )
-    assert bt.parse_stats(log) == {
-        "stats_lines": 2, "lagging_max": 490, "max_pending_max": 5,
-        "coalesced_total": 20210, "lag_entries_total": 490, "hopeless_closes_total": 1,
-    }
-
-
-def test_no_stats_lines_in_a_short_run(tmp_path):
-    log = tmp_path / "run.log"
-    log.write_text("LiveRecall server listening on ws://0.0.0.0:8791\n")
-    assert bt.parse_stats(log)["stats_lines"] == 0
-
-
-def test_hopeless_closes_after_the_last_stats_line_are_counted(tmp_path):
-    log = tmp_path / "run.log"
-    log.write_text(
-        "[stats 1] clients=5 lagging=0 history=1 active=0 max_pending=0 "
-        "coalesced_total=0 lag_entries_total=0 hopeless_closes_total=1\n"
-        "client overflow, closing: id=1\nclient overflow, closing: id=2\n"
-    )
-    assert bt.parse_stats(log)["hopeless_closes_total"] == 2
 
 
 def test_run_log_must_show_our_server_in_the_requested_mode():

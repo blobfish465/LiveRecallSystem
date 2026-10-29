@@ -49,7 +49,7 @@ import threading
 import time
 from pathlib import Path
 
-from check import TIMER_DRIFT_WARN, timer_drift
+from check import TIMER_DRIFT_WARN, parse_stats, rss_mb, server_listened, server_pid, timer_drift
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
@@ -112,30 +112,6 @@ def iface_tx_bytes(iface: str) -> int:
     raise SystemExit(f"interface {iface} not in /proc/net/dev")
 
 
-def server_pid(port: int) -> int | None:
-    """PID of the solution_server.py that run_demo.py started on `port` (same idea as monitor_server.py)."""
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmd = (entry / "cmdline").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if b"solution_server.py" in cmd and b"--port" in cmd and str(port).encode() in cmd:
-            return int(entry.name)
-    return None
-
-
-def rss_mb(pid: int) -> float | None:
-    try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) / 1024.0
-    except OSError:
-        pass
-    return None
-
-
 class Sampler(threading.Thread):
     """Every SAMPLE_S: bytes through the interface and the server's RSS, until stop() is called."""
 
@@ -187,29 +163,9 @@ def link_rates(samples: list[tuple[float, int]], window_s: float = 5.0) -> dict[
     return {"link_mbit_avg": (b1 - b0) * 8 / (t1 - t0) / 1e6, "link_mbit_peak5s": peak}
 
 
-def parse_stats(log: Path) -> dict[str, int]:
-    """Server [stats] lines (one every 10 s): peaks of lagging/max_pending, final values of the totals."""
-    out = {"stats_lines": 0, "lagging_max": 0, "max_pending_max": 0,
-           "coalesced_total": 0, "lag_entries_total": 0, "hopeless_closes_total": 0}
-    overflows = 0
-    for line in log.read_text(errors="replace").splitlines():
-        if line.startswith("client overflow, closing:"):
-            overflows += 1  # every hopeless close logs this line; the totals lag by up to 10 s
-        if not line.startswith("[stats"):
-            continue
-        out["stats_lines"] += 1
-        kv = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
-        out["lagging_max"] = max(out["lagging_max"], kv.get("lagging", 0))
-        out["max_pending_max"] = max(out["max_pending_max"], kv.get("max_pending", 0))
-        for key in ("coalesced_total", "lag_entries_total", "hopeless_closes_total"):
-            out[key] = kv.get(key, out[key])
-    out["hopeless_closes_total"] = max(out["hopeless_closes_total"], overflows)
-    return out
-
-
 def check_run_log(text: str, config: str, port: int) -> None:
     """The run is only valid if *our* server bound the port and ran in the requested mode."""
-    if f"LiveRecall server listening on ws://0.0.0.0:{port}" not in text:
+    if not server_listened(text, port):
         raise SystemExit(f"the server never listened on {port} (port busy?); see the .log")
     if ("baseline mode: --no-coalesce" in text) != (config == "before"):
         raise SystemExit(f"the server ran in the wrong mode for '{config}' (LIVERECALL_NO_COALESCE exported?)")
@@ -248,7 +204,7 @@ def run_once(mode: str, config: str, run_no: int, args) -> dict:
 
     summary = json.loads((HERE / f"{stem}.json").read_text(encoding="utf-8"))
     summary.update(link)
-    summary["server"] = parse_stats(log)
+    summary["server"] = parse_stats(log.read_text(errors="replace"))
     summary["qdisc"] = qdisc(args.iface)
     if before and after:
         summary["tbf_dropped"] = after["dropped"] - before["dropped"]
