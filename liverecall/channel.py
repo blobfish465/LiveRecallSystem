@@ -45,8 +45,8 @@ holds at most the newest provisional per segment, so nothing stale is sent). The
 wait is `recover_s` (60 s) for a slow reader, because a failed try refills its
 16-message read-ahead (~8 s of backlog at T3's 2 msg/s), and `link_recover_s`
 (10 s) for a slow link, where a failed try only congests the link for a moment.
-Each wait gets +-50% jitter so clients that lagged together do not all retry
-together. Entering lag within REARM_S of leaving doubles the next wait (up to
+Each wait gets jitter so clients that lagged together do not all retry
+together: +-50% for a link, +0..50% for a reader (60 s is a floor, see RECOVER_S). Entering lag within REARM_S of leaving doubles the next wait (up to
 RECOVER_MAX_S); a longer calm period resets it.
 """
 
@@ -94,7 +94,16 @@ LINK_RECOVER_S = 10.0
 # client *app* reads) at or above this when a pong is late: the link is slow, not the
 # reader. Loopback is ~0.1 ms; a stalled reader does not raise it.
 LINK_RTT_S = 0.05
-# Each lag entry waits recover_s x uniform(1 - J, 1 + J). On a slow link all clients
+# A slow link must be confirmed: LINK_STRIKES overdue pongs in a row, or one pong
+# LINK_CONFIRM_S overdue. Congestion delays every pong; a lost segment's retransmit
+# delays one. Measured on public T5 (delay_loss: 120+-30 ms each way, 3% loss), entering
+# at the first late pong: ~35 false "slow link" entries per run, coverage 93.5% vs the
+# FIFO's 99.97%, no freshness gain (P95 736 vs 691 ms). Readers still enter at once.
+LINK_STRIKES = 2
+LINK_CONFIRM_S = 3.0
+# A slow-link lag entry waits link_recover_s x uniform(1 - J, 1 + J), a slow-reader
+# one recover_s x uniform(1, 1 + J): with +-50% a T3 reader retried after ~30 s while
+# still slow and lost tail finals (2 of 3 60 s runs, Day 4 part 2). On a slow link all clients
 # enter lag together; without jitter they also all retry full delivery together and
 # flood the link at once (measured: P50 caption age 80 ms between retries, 900 ms
 # during them). Spread out, each retry adds a little load, and the backoff settles on
@@ -129,6 +138,8 @@ class ClientChannel:
         jitter: float = RECOVER_JITTER,
         rtt: Callable[[], float | None] | None = None,
         link_recover_s: float = LINK_RECOVER_S,
+        link_strikes: int = LINK_STRIKES,
+        link_confirm_s: float = LINK_CONFIRM_S,
         clock: Callable[[], float] = time.time,  # same clock as Caption.recv_ts
     ) -> None:
         self._send = send
@@ -151,6 +162,10 @@ class ClientChannel:
         self._rtt = rtt  # kernel RTT in seconds (None: unknown -> treat lag as a slow reader)
         self.link_lag = False  # cause of the current lag: slow link (True) or slow reader
         self.link_lag_entries = 0
+        self.link_strikes = link_strikes
+        self.link_confirm_s = link_confirm_s
+        self._strikes = 0  # overdue pongs in a row on a slow link, not yet in lag
+        self._strike_ping_at: float | None = None  # ping whose overdue pong was counted
         self._recover_s = recover_s  # current wait; doubles on relapse
         self.jitter = jitter
         self._recover_wait = recover_s  # _recover_s with this lag entry's jitter
@@ -285,6 +300,8 @@ class ClientChannel:
                 # Wake when it becomes overdue, so lag is noticed without an offer
                 # (its done callback wakes us if it arrives first).
                 overdue_in = self._ping_at + self.lag_s - now
+                if overdue_in <= 0:  # overdue, maybe an unconfirmed slow-link strike
+                    overdue_in = self._ping_at + self.link_confirm_s - now
                 if not self.lagging and overdue_in > 0:
                     timeout = overdue_in
             elif self.lagging:
@@ -330,8 +347,10 @@ class ClientChannel:
             pong_at = loop.time()
             if pong_at - self._ping_at > self.lag_s:
                 self._calm_since = None
-            elif self._calm_since is None:
-                self._calm_since = pong_at
+            else:
+                self._strikes = 0  # on time: an earlier late pong was a one-off
+                if self._calm_since is None:
+                    self._calm_since = pong_at
             self._wakeup.set()
 
         pong.add_done_callback(done)
@@ -366,7 +385,11 @@ class ClientChannel:
         if self.lagging:
             self._calm_since = None  # an overdue pong is not calm
             return
-        self.link_lag = self._slow_link()
+        link = self._slow_link()
+        if link and not self._link_confirmed(now):
+            return
+        self._strikes = 0
+        self.link_lag = link
         self.link_lag_entries += self.link_lag
         base = self._link_recover_s if self.link_lag else self._base_recover_s
         if self._left_lag_at is not None and now - self._left_lag_at < REARM_S:
@@ -375,12 +398,26 @@ class ClientChannel:
             self._recover_s = max(base, min(self._recover_s * 2, RECOVER_MAX_S))
         else:
             self._recover_s = base
-        self._recover_wait = self._recover_s * random.uniform(1 - self.jitter, 1 + self.jitter)
+        # A slow reader's wait is a floor (an early retry refills its read-ahead and
+        # loses tail finals: Day 4 part 2, T3 60 s 99.83%), so jitter only upwards.
+        low = 1 - self.jitter if self.link_lag else 1.0
+        self._recover_wait = self._recover_s * random.uniform(low, 1 + self.jitter)
         self._calm_since = None
         self.lagging = True
         self.coalescing = True
         self.lag_entries += 1
         self._compact()
+
+    def _link_confirmed(self, now: float) -> bool:
+        if self.link_lag and self._left_lag_at is not None and now - self._left_lag_at < REARM_S:
+            # Relapse on a link already confirmed slow: believe the first late pong.
+            # Waiting for a second one let every 10 s retry flood the 2 Mbit/s link
+            # for ~2 s (500 clients: fresh finals 53% -> 16%, up to 14 failed handshakes).
+            return True
+        if self._strike_ping_at != self._ping_at:  # this ping's pong just went overdue
+            self._strike_ping_at = self._ping_at
+            self._strikes += 1
+        return self._strikes >= self.link_strikes or now - self._ping_at > self.link_confirm_s
 
     def _compact(self) -> None:
         """Drop provisionals queued before lag mode that a newer entry of the

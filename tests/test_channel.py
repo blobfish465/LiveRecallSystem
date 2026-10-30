@@ -516,6 +516,7 @@ def test_ping_budget_limits_pings_per_interval():
 
 
 def lag_channel(rtt_s, **kw):
+    kw.setdefault("link_strikes", 1)  # one late pong enters lag (confirmation tested below)
     rec, ping = Recorder(), FakePing()
     ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05,
                        rtt=lambda: rtt_s, **kw)
@@ -536,17 +537,20 @@ def test_lag_cause_from_kernel_rtt_sets_recover_wait(rtt_s, link):
     asyncio.run(main())
 
 
-def test_recover_wait_jitter_stays_in_bounds():
+@pytest.mark.parametrize("rtt_s,low,high", [(0.2, 5, 15), (0.0001, 10, 15)])
+def test_recover_wait_jitter_stays_in_bounds(rtt_s, low, high):
+    """Slow link: +-50%. Slow reader: never below the base (an early retry while the
+    reader is still slow refills its read-ahead and loses tail finals in T3)."""
     async def main():
         waits = []
         for _ in range(20):
-            rec, ping, ch = lag_channel(0.0001, recover_s=10, jitter=0.5)
+            rec, ping, ch = lag_channel(rtt_s, recover_s=10, link_recover_s=10, jitter=0.5)
             task = asyncio.create_task(ch.run())
             await enter_lag(ch, ping, 1)
             waits.append(ch._recover_wait)
             ch.close()
             await task
-        assert all(5 <= w <= 15 for w in waits)
+        assert all(low <= w <= high for w in waits)
         assert len(set(waits)) > 1
 
     asyncio.run(main())
@@ -609,7 +613,8 @@ def test_relapse_wait_never_below_the_new_causes_base():
         rtt = [0.2]  # first lag: slow link
         rec, ping = Recorder(), FakePing()
         ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05,
-                           recover_s=0.3, link_recover_s=0.05, jitter=0, rtt=lambda: rtt[0])
+                           recover_s=0.3, link_recover_s=0.05, jitter=0, rtt=lambda: rtt[0],
+                           link_strikes=1)
         task = asyncio.create_task(ch.run())
         await enter_lag(ch, ping, 1)
         assert ch.link_lag and ch._recover_s == 0.05
@@ -618,6 +623,111 @@ def test_relapse_wait_never_below_the_new_causes_base():
         rtt[0] = 0.0001  # relapse, now a slow reader: 2 x 0.05 would be below 0.3
         await enter_lag(ch, ping, 3)
         assert not ch.link_lag and ch._recover_s == 0.3
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_one_late_pong_on_slow_link_is_not_lag():
+    """T5: a retransmit holds one pong past lag_s; that alone must not start coalescing."""
+    async def main():
+        rec, ping, ch = lag_channel(0.25, link_strikes=2, link_confirm_s=10)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)  # first pong overdue: one strike
+        ch.offer(cap(2, 1))
+        await settle()
+        assert not ch.lagging
+        ping.futures[0].set_result(None)  # the late pong arrives
+        await settle()
+        ch.offer(cap(3, 1))  # next ping goes out
+        await settle()
+        assert len(ping.futures) == 2
+        ping.futures[1].set_result(None)  # on time: strikes reset
+        await settle()
+        ch.offer(cap(4, 1))
+        await settle()
+        await asyncio.sleep(0.1)  # a later one-off late pong: one strike again
+        ch.offer(cap(5, 1))
+        await settle()
+        assert not ch.lagging and ch.lag_entries == 0
+        assert keys(rec.sent) == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_consecutive_late_pongs_on_slow_link_enter_lag():
+    async def main():
+        rec, ping, ch = lag_channel(0.25, link_strikes=2, link_confirm_s=10)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)
+        ch.offer(cap(2, 1))
+        await settle()
+        assert not ch.lagging
+        ping.futures[0].set_result(None)  # late
+        await settle()
+        ch.offer(cap(3, 1))
+        await settle()
+        await asyncio.sleep(0.1)  # second pong overdue too: congestion
+        ch.offer(cap(4, 1))
+        await settle()
+        assert ch.lagging and ch.link_lag and ch.link_lag_entries == 1
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_one_very_late_pong_on_slow_link_enters_lag():
+    """A pong that stays overdue past link_confirm_s is not a one-off retransmit."""
+    async def main():
+        rec, ping, ch = lag_channel(0.25, link_strikes=2, link_confirm_s=0.2)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        await asyncio.sleep(0.1)
+        ch.offer(cap(2, 1))
+        await settle()
+        assert not ch.lagging
+        await until(lambda: ch.lagging)  # no offer needed: the sender wakes itself
+        assert ch.link_lag
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_slow_reader_still_enters_lag_at_first_late_pong():
+    async def main():
+        rec, ping, ch = lag_channel(0.0001, link_strikes=2)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert not ch.link_lag
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_link_relapse_enters_lag_at_first_late_pong():
+    """Once a link was confirmed slow, a retry that congests it again must not wait for
+    a second late pong (the whole client population would flood the link)."""
+    async def main():
+        rec, ping, ch = lag_channel(0.25, link_strikes=1, link_confirm_s=10,
+                                    recover_s=0.1, link_recover_s=0.05, jitter=0)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        await recover(ch, ping)
+        ping.auto = False
+        ch.link_strikes = 2  # would need two strikes for a first entry
+        await enter_lag(ch, ping, 3)
+        assert ch.link_lag and ch.lag_entries == 2
         ch.close()
         await task
 
