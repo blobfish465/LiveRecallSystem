@@ -232,7 +232,8 @@ def server_listened(text: str, port: int) -> bool:
 def parse_stats(text: str) -> dict[str, int]:
     """Server [stats] lines (one every 10 s): peaks of lagging/max_pending, final values of the totals."""
     out = {"stats_lines": 0, "lagging_max": 0, "max_pending_max": 0,
-           "coalesced_total": 0, "lag_entries_total": 0, "hopeless_closes_total": 0}
+           "coalesced_total": 0, "lag_entries_total": 0, "link_lag_entries_total": 0,
+           "hopeless_closes_total": 0}
     overflows = 0
     # The harness, the source, the clients and the server all print into the same
     # log, and print() writes the text and the newline separately, so another
@@ -249,7 +250,7 @@ def parse_stats(text: str) -> dict[str, int]:
         kv = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
         out["lagging_max"] = max(out["lagging_max"], kv.get("lagging", 0))
         out["max_pending_max"] = max(out["max_pending_max"], kv.get("max_pending", 0))
-        for key in ("coalesced_total", "lag_entries_total", "hopeless_closes_total"):
+        for key in ("coalesced_total", "lag_entries_total", "link_lag_entries_total", "hopeless_closes_total"):
             out[key] = kv.get(key, out[key])
     out["hopeless_closes_total"] = max(out["hopeless_closes_total"], overflows)
     return out

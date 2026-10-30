@@ -306,6 +306,7 @@ ROWS = [  # (label, key, sub-key or None, digits)
     ("converging: never back to full delivery", "convergence", "never_full_delivery", 0),
     ("server: lag entries / coalesced / hopeless closes", "server", "lag_entries_total", 0),
     ("server: lagging clients, peak", "server", "lagging_max", 0),
+    ("server: lag entries (slow link)", "server", "link_lag_entries_total", 0),
 ]
 
 

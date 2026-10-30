@@ -255,7 +255,7 @@ async def settle(n=20):
 def test_fast_client_never_lags():
     async def main():
         rec, ping = Recorder(), FakePing(auto=True)
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05)
         task = asyncio.create_task(ch.run())
         want = []
         for seg in range(1, 4):
@@ -272,7 +272,7 @@ def test_fast_client_never_lags():
 def test_stuck_pong_enters_lag_mode_and_holds_provisionals():
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05)
         task = asyncio.create_task(ch.run())
         ch.offer(cap(1, 1))
         await settle()
@@ -293,10 +293,12 @@ def test_stuck_pong_enters_lag_mode_and_holds_provisionals():
     asyncio.run(main())
 
 
-def test_lag_mode_releases_one_final_per_pong():
+def test_lag_mode_sends_finals_without_waiting_for_pongs():
+    """No stop-and-wait: on a slow link one final per round trip is slower than the
+    source; finals go out as they arrive, provisionals stay queued and coalesced."""
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05)
         task = asyncio.create_task(ch.run())
         ch.offer(cap(1, 1))
         await settle()
@@ -308,14 +310,10 @@ def test_lag_mode_releases_one_final_per_pong():
             ch.offer(cap(seg, 1))
             ch.offer(cap(seg, 2))
             ch.offer(cap(seg, 3, True))
-        await settle()
-        expect = [(1, 1)]
-        for nxt in [(9, 1), (2, 3), (3, 3), (4, 3)]:
-            assert keys(rec.sent) == expect
-            ping.futures[-1].set_result(None)
             await settle()
-            expect = expect + [nxt]
-        assert keys(rec.sent) == expect
+        # Every final went out while the first pong is still outstanding.
+        assert keys(rec.sent) == [(1, 1), (9, 1), (2, 3), (3, 3), (4, 3)]
+        assert len(ping.futures) == 1 and not ping.futures[0].done()
         # No provisional of a segment that has a final was sent after lag began.
         assert all(m["final"] for m in rec.sent[1:])
         assert queued(ch) == []
@@ -338,7 +336,7 @@ def test_entering_lag_drops_provisionals_queued_before_it():
 def test_lag_with_only_provisionals_blocks_and_close_is_prompt():
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05)
         task = asyncio.create_task(ch.run())
         ch.offer(cap(1, 1))
         await settle()
@@ -389,7 +387,7 @@ async def recover(ch, ping):
 def test_recovers_to_full_delivery_after_pongs_turn_fast():
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05, recover_s=0.1)
         task = asyncio.create_task(ch.run())
         await enter_lag(ch, ping, 1)
         assert ch.lag_exits == 0
@@ -409,7 +407,7 @@ def test_recovers_to_full_delivery_after_pongs_turn_fast():
 def test_no_stale_revision_across_lag_entry_and_exit():
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05, recover_s=0.1)
         task = asyncio.create_task(ch.run())
         ch.offer(cap(1, 1))
         await settle()
@@ -442,7 +440,7 @@ def test_relapse_doubles_recover_wait_up_to_cap(monkeypatch):
 
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05, recover_s=0.1)
         task = asyncio.create_task(ch.run())
         await enter_lag(ch, ping, 1)
         assert ch._recover_s == 0.1
@@ -464,7 +462,7 @@ def test_long_calm_period_resets_recover_wait(monkeypatch):
 
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.1)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05, recover_s=0.1)
         task = asyncio.create_task(ch.run())
         await enter_lag(ch, ping, 1)
         await recover(ch, ping)
@@ -480,7 +478,7 @@ def test_long_calm_period_resets_recover_wait(monkeypatch):
 def test_late_pong_in_lag_resets_calm_timer():
     async def main():
         rec, ping = Recorder(), FakePing()
-        ch = ClientChannel(rec, ping=ping, lag_s=0.05, recover_s=0.5)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05, recover_s=0.5)
         task = asyncio.create_task(ch.run())
         await enter_lag(ch, ping, 1)
         ping.futures[0].set_result(None)  # the late pong that caused lag
@@ -495,6 +493,131 @@ def test_late_pong_in_lag_resets_calm_timer():
         ping.futures[2].set_result(None)
         await settle()
         assert ch._calm_since is None and ch.lagging and ch.lag_exits == 0
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_ping_budget_limits_pings_per_interval():
+    async def main():
+        rec, ping = Recorder(), FakePing(auto=True)
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=10)
+        task = asyncio.create_task(ch.run())
+        for seg in range(1, 6):
+            for rev in (1, 2, 3):
+                ch.offer(cap(seg, rev, rev == 3))
+            await settle()
+        await drain(ch, task)
+        assert len(keys(rec.sent)) == 15
+        assert len(ping.futures) == 1  # Day 2 sent one per send: 15
+
+    asyncio.run(main())
+
+
+def lag_channel(rtt_s, **kw):
+    rec, ping = Recorder(), FakePing()
+    ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05,
+                       rtt=lambda: rtt_s, **kw)
+    return rec, ping, ch
+
+
+@pytest.mark.parametrize("rtt_s,link", [(0.0001, False), (0.2, True), (None, False)])
+def test_lag_cause_from_kernel_rtt_sets_recover_wait(rtt_s, link):
+    async def main():
+        rec, ping, ch = lag_channel(rtt_s, recover_s=60, link_recover_s=10, jitter=0)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert ch.link_lag is link and ch.link_lag_entries == int(link)
+        assert ch._recover_wait == (10 if link else 60)
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_recover_wait_jitter_stays_in_bounds():
+    async def main():
+        waits = []
+        for _ in range(20):
+            rec, ping, ch = lag_channel(0.0001, recover_s=10, jitter=0.5)
+            task = asyncio.create_task(ch.run())
+            await enter_lag(ch, ping, 1)
+            waits.append(ch._recover_wait)
+            ch.close()
+            await task
+        assert all(5 <= w <= 15 for w in waits)
+        assert len(set(waits)) > 1
+
+    asyncio.run(main())
+
+
+def test_unanswered_ping_closes_stalled_reader():
+    """Lag mode sends finals straight to the socket, so a stalled reader's backlog is
+    not in our queue: an old unanswered ping is the hopeless signal instead."""
+    async def main():
+        now = [1000.0]
+        hits = []
+        rec, ping, ch = lag_channel(0.0001, hopeless_s=10, clock=lambda: now[0],
+                                    on_overflow=hits.append)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        ch.offer(cap(3, 1, True, recv_ts=now[0]))
+        await settle()
+        # The final went out; only the provisional from enter_lag stays queued.
+        assert not ch.closed and keys(rec.sent)[-1] == (3, 1) and queued(ch) == [(2, 1)]
+        now[0] += 10.5
+        ch.offer(cap(4, 1, True, recv_ts=now[0]))
+        assert ch.overflowed and ch.closed and hits == [ch]
+        await task
+
+    asyncio.run(main())
+
+
+def test_unanswered_ping_on_slow_link_is_not_hopeless():
+    async def main():
+        now = [1000.0]
+        rec, ping, ch = lag_channel(0.3, hopeless_s=10, clock=lambda: now[0])
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        now[0] += 30
+        ch.offer(cap(3, 1, True, recv_ts=now[0]))
+        await settle()
+        assert not ch.closed and keys(rec.sent)[-1] == (3, 1)
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_failed_pong_closes_channel():
+    async def main():
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        ping.futures[0].set_exception(ConnectionError("gone"))
+        await asyncio.wait_for(task, timeout=1)
+        assert ch.closed
+
+    asyncio.run(main())
+
+
+def test_relapse_wait_never_below_the_new_causes_base():
+    async def main():
+        rtt = [0.2]  # first lag: slow link
+        rec, ping = Recorder(), FakePing()
+        ch = ClientChannel(rec, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05,
+                           recover_s=0.3, link_recover_s=0.05, jitter=0, rtt=lambda: rtt[0])
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert ch.link_lag and ch._recover_s == 0.05
+        await recover(ch, ping)
+        ping.auto = False
+        rtt[0] = 0.0001  # relapse, now a slow reader: 2 x 0.05 would be below 0.3
+        await enter_lag(ch, ping, 3)
+        assert not ch.link_lag and ch._recover_s == 0.3
         ch.close()
         await task
 

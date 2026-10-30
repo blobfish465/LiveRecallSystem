@@ -48,6 +48,19 @@
   3. I re-read the assignment's mandatory public tests against our state rather than taking the assistant's summary: T1–T4 are gated in `check.py`, T5 has only one WSL2 run, so Day 4 must re-run T1–T5 three times on one VM with valid timers, using the scripted tools rather than hand-typed `tc` commands, so that the report's numbers are reproducible and consistent across teammates.
   4. Decisions that were mine, not the tool's: the scope of the passwordless `sudo` rule (`/usr/sbin/tc` only, on this VM only); reporting the constrained-bandwidth loss honestly as a finding instead of re-tuning the experiment; and keeping the browser client's recall purely local (no request to the server), as the spec requires.
 
+### Day 4 part 1 (Frankfurters) — lag-policy fixes for slow links and recovery
+
+- **Tool:** Claude Code (Claude Opus 5.5), cloud session.
+- **Used for:** reproducing Day 3's constrained-bandwidth result, redesigning the lag policy in `liverecall/channel.py` (ping budget, no stop-and-wait, lag cause from the kernel's TCP RTT, recovery jitter, hopeless-by-unanswered-ping), small per-client send buffers in `solution_server.py`, unit tests, and running the bandwidth / convergence / T3 / stress experiments.
+- **Useful suggestions:**
+  1. Read the kernel's smoothed TCP RTT (`TCP_INFO`) to tell a slow *link* from a slow *reader*: the client's kernel ACKs data whether or not its app reads, so a late pong with a low kernel RTT can only be the reader. It costs one `getsockopt` per lag decision and no network traffic.
+  2. Look at caption age in 5 s windows instead of only the run's P95. That showed all 500 clients retrying full delivery in the same second (P50 ~80 ms between retries, ~900 ms during them), which ±50% jitter on the recovery wait fixed.
+- **Suggestions that were wrong or changed:**
+  1. Day 3's handoff (also Claude-drafted) proposed probing slow-reader recovery with one segment's provisionals. Working through the websockets client's 16-message read-ahead showed it can't detect anything: 2 extra messages fit in the read-ahead and the pong stays fast for slow and fast readers alike.
+  2. Its first fix cut the recovery wait to 10 s for *every* lagging client. Convergence would have improved, but the T3 gate failed at 98.3% finals: each failed retry refills a slow reader's read-ahead (~8 s of backlog), and finals still unread when the run ends count as missing. Changed to 10 s for slow links only and kept 60 s for slow readers, with the T3 and convergence numbers in `HANDOFF.md`.
+  3. It added a "send blocked > 50 ms = congested link" mode with `TCP_NOTSENT_LOWAT`. A debug counter showed it never fired in three 500-client runs (the backlog sits in the shaper's shared queue, not in our socket), so the mode was removed. The small buffers stayed because a with/without run showed they help on their own.
+- **What I checked myself:** TODO (Frankfurters: read the diff and the "Why not for readers" paragraph in `HANDOFF.md` until you can explain the ping budget, the RTT classifier and why slow readers keep 60 s without notes).
+
 ## Tools used
 
 TODO (final): list all tools across the team.

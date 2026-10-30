@@ -242,6 +242,7 @@ ROWS = [  # (label, key, sub-key or None, digits)
     ("link Mbit/s, peak 5 s", "link_mbit_peak5s", None, 2),
     ("tbf packets dropped", "tbf_dropped", None, 0),
     ("lagging clients, peak", "server", "lagging_max", 0),
+    ("lag entries (slow link)", "server", "link_lag_entries_total", 0),
     ("provisionals coalesced", "server", "coalesced_total", 0),
     ("hopeless closes", "server", "hopeless_closes_total", 0),
     ("max_pending, peak", "server", "max_pending_max", 0),

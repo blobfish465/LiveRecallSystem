@@ -395,9 +395,72 @@ From `python check.py --runs 3` (quick durations: unmodified `run_demo.py`, shor
 - `check.py --stress [--runs 3] [--full]`; `--only s500` etc. also works. `server_pid`, `rss_mb`, `parse_stats`, `server_listened` live in `check.py` and are imported by `bandwidth_test.py`. Each scenario's harness + server output is in `results/check_<name>.log`.
 - The browser client's interface is the protocol only; `window.liverecall` exposes `store`, `counters`, `dropConnection()` for tests and the console.
 
-## Day 4 — TBD
+## Day 4 (part 1) — Frankfurters — lag-policy fixes (Day 3's two problems)
 
-To pick up (in this order):
-1. **Two lag-policy fixes in `liverecall/channel.py`** (Day 3, "Proposed fix" under bandwidth and under convergence): (a) on a slow *link*: ping budget, no stop-and-wait in lag mode, rarer probes; (b) after overload: probe full delivery with one segment's provisionals instead of waiting a fixed 60/120 s. Keep `check.py` green (T3 limits), then re-run `bandwidth_test.py --apply --clients 500 --runs 3` and `convergence_test.py --runs 3` (+ `--slow-until 90 --duration 230`) and put the before/after tables in the report.
-2. T1–T5 x3 on one VM with timer drift < 10% (`check.py --full --runs 3` for T1–T4 + late join; T5 with `network_profiles/` + `run_demo.py --runs 3`), `check.py --stress --runs 3`, 5-minute memory run with `monitor_server.py`.
+### Status: problem 1 (slow link) FIXED; problem 2 (recovery) fixed for slow links, NOT for slow readers (by design, see below)
+
+`pytest` (104 passed, 1 skipped: browser tests need Firefox) and `python check.py` (GATE PASSED) pass. Core tests also pass under Python 3.10 (`uv run --python 3.10`).
+
+> **Environment for every number in this section:** a Claude Code cloud container (Linux 6.18, 4 vCPU, Python 3.13, websockets 16.1.1), **asyncio timer drift +0%**. *Not* the Mininet VM: these are dev numbers. The final report tables must be re-run on the one reference VM (Day 4 part 2 below). This container has no `sch_prio` or `sch_netem`, so `bandwidth_test.py --apply` (which uses `prio`) could not run as is. The same shaper was applied by hand with `htb` as the classifier root (`htb default 2`; class 1:1 with the public profile's `tbf rate 2mbit burst 4000 latency 400ms`; the same u32 dport/sport filters on 8791) and the script was run without `--apply`. T5 (netem) could not run here at all.
+
+### What changed (all in `liverecall/channel.py` + `tighten_send_path`/`kernel_rtt` in `solution_server.py`)
+
+1. **Ping budget.** At most one ping per client per `PING_EVERY_S = 1 s` (one per `LAG_PROBE_S = 3 s` while lagging) instead of one after every send. A stalled reader's pong is late by seconds, so T3 detection is unchanged.
+2. **No stop-and-wait in lag mode.** Finals/control go out as they arrive; provisionals stay queued and coalesced, as before. Since finals now go straight to the socket, a stalled reader's backlog is no longer in our queue, so **an unanswered ping older than `HOPELESS_S` (10 s) now also closes the client** (same 1013 + HISTORY recovery as the queue-age cap).
+3. **Lag cause from the kernel's TCP RTT** (`TCP_INFO.tcpi_rtt`, one `getsockopt`, no network cost). The client's *kernel* ACKs data whether or not its *app* reads, so high RTT at lag entry means a slow **link**, low RTT with a late pong means a slow **reader**. Threshold `LINK_RTT_S = 50 ms` (loopback ~0.1 ms). The cause sets the recovery wait: **10 s for a link** (a failed retry only congests the link for a moment), **60 s for a reader** (unchanged, see "Why not for readers"). An unanswered ping on a slow link is *not* hopeless (RTO backoff can hold a pong for a long time while finals still arrive).
+4. **Recovery jitter ±50%.** On a slow link all 500 clients enter lag in the same second; without jitter they also all retried full delivery in the same second and flooded the link (1 run, 5 s windows: P50 caption age ~80 ms between retries, ~900 ms during them).
+5. **Backoff:** a relapse doubles the wait (cap `RECOVER_MAX_S = 120 s`, rearm window 120 s, as Day 2), but never below the base for the *new* cause.
+6. **Small per-client send buffers (lag-aware server only):** `TCP_NOTSENT_LOWAT = 512 B` and asyncio write high-water 512 B. At 500 clients on 2 Mbit/s each client's share is ~500 B/s, so every KiB queued under our channel is ~2 s of caption age, and our pings queue behind it too. Measured (1 run each): with them 100% finals, P50 213 ms; without, 98.7%, P50 547 ms. The `--no-coalesce` baseline keeps Day 3's settings, so before/after stays comparable.
+7. `[stats]` gains `link_lag_entries_total`; `check.py`, `bandwidth_test.py` and `convergence_test.py` report it.
+
+Tried and dropped: treating "a send blocked > 50 ms" as link congestion (coalesce but keep sending everything). It never fired in three 500-client runs: the backlog sits in the shared tbf queue, not in our socket's unsent bytes. Removed rather than kept as untested code.
+
+### Constrained bandwidth: before/after (500 clients, 60 s, 2 Mbit/s tbf on the server port, median of 3, interleaved)
+
+`python bandwidth_test.py --clients 500 --duration 60 --runs 3 --tag _day4` (shaper applied by hand, see above).
+
+| 500 clients, 60 s, median of 3 | plain FIFO (before) | lag-aware, Day 3 code (1 run) | **lag-aware, Day 4 (after)** |
+|---|---:|---:|---:|
+| final completeness | 98.7% (98.6 / 98.7 / 98.7) | 93.0% | **100%** (100 / 100 / 100) |
+| normal update coverage | 98.9% | 42.2% | 51.3% |
+| P50 / P95 / P99 caption age | 1094 / 1563 / 2908 ms | 919 / 9337 / 10496 ms | **365 / 1143 / 1574 ms** |
+| fresh captions / fresh finals (≤ 500 ms) | 0% / 0% | 0.1% / 0% | **59.5% / 61.9%** |
+| duplicates / stale / connection errors | 0 / 0 / 0 | 0 / 0 / 395 | 0 / 0 / 0 |
+| hopeless closes | 0 | 392 | 0 |
+| tbf packets dropped | 65.8k | 4.5k | 8.4k |
+| lagging clients peak / lag entries classified "slow link" | 0 / 0 | 400 / n/a | 462 / 1128 |
+| server RSS max | 61.1 MB | 84.6 MB | 62.0 MB |
+
+The Day 3 column is this container's re-run of the Day 3 code (1 run, same setup); it reproduces Day 3's VM numbers (94.3%, P95 9.3 s, 392 closes), so the comparison is like for like.
+
+**Reading it:** the lag-aware server now beats the plain queue on every freshness metric and on completeness. P50 is 3× lower, P95 27% lower, ~60% of captions are fresh against none, and finals are 100% against 98.7%. **The trade-off is coverage (51% vs 99%):** while a client is lagging on the slow link, its provisionals are coalesced and only finals are sent. The link carries the FIFO's full stream only by queueing ~1 s of it (TCP packs the queued captions into fewer, larger segments), so full delivery and freshness can't both be had at 500 clients. The policy picks freshness and finals, which is what the spec's "suppress obsolete provisionals under genuine overload" allows. The jittered 10 s retries keep trying full delivery, so coverage is above finals-only (33%). Per-run P95 1130–1172 ms; fresh % varies the most between runs (42–67%).
+
+### Recovery after overload (convergence test)
+
+`python convergence_test.py --runs 3 --only after --tag _day4` (100 normal + 10 converging clients, slow 500 ms/msg for 30 s of 120 s), median of 3: 100% finals, 0 dup/stale/errors, normal P95 9.6 ms, slow-phase P95 9.9 s, **full delivery again 45.3 s after the switch (Day 3: 45.3 s), i.e. unchanged**, all 10 lag entries correctly classified "slow reader", 0 "slow link".
+
+**Why not for readers (problem 2 as Day 3 described it), and why the suggested probe can't work.** For a slow *link*, recovery is fixed: retries start after ~10 s (5–15 s with jitter). For a slow *reader*, the Day 3 proposal was "send one segment's provisionals every ~10 s and check the pong stays fast". It can't tell a fast reader from a T3 reader. The websockets client parses frames (and answers pings) into a 16-message read-ahead whatever its app does, so 2 extra messages fit there and the pong stays fast. A 2 msg/s reader in finals-only mode (1.33/s) has spare capacity too, so its read-ahead is as empty as a fast reader's. The only observable difference is a *full* read-ahead, and the only way to fill it is to send more than the reader reads, i.e. try full delivery. For a still-slow T3 reader one failed try costs ~16 messages, ~8 s of backlog, which then drains at only 0.67 msg/s (~24 s). When a run ends inside that window, the unread finals count as missing. Measured (1 run each) with a 10 s reader wait instead of 60 s: T3 40 s **98.3%** finals (gate fails), T3 60 s 99.86%, T3 120 s 99.67%. The 60 s wait gives 100% in all three (Day 3 code on the 120 s run as well). Final completeness is capped in grading (< 99% caps hidden D at 15/30) and coverage is not, so slow readers keep the 60 s wait. The cost is that a reader who speeds up waits ~45 s for provisionals (freshness returns at once either way).
+
+Not re-run here: the 230 s relapse case (`--slow-until 90 --duration 230`). Reader backoff is the same as Day 2/3, so Day 3's ~120 s still applies to it.
+
+### Numbers today (1 run of `check.py` quick durations; cloud container, timer drift +0%; not median of 3)
+
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%, P50 2.2 ms, P95 3.2 ms
+- T2 (100 clients):  P50 6.5 ms, P95 11.9 ms, P99 14.7 ms, completeness 100%, coverage 100%
+- T3 (10% slow):     normal P95 11.2 ms, slow P95 9104 ms, completeness 100%, coverage 95.1%, hopeless closes 0
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, coverage 96.3%, recovery P95 3.5 ms
+- late join (20%):   dup 0, stale 0, completeness 100%, recovery P95 1.2 ms
+- stress (`check.py --stress`, 1 run): s300 / s500 / s500slow all PASS, 100% finals, 0 dup/stale/hopeless closes; P95 29.1 / 46.7 ms / normal 41.2 ms (slow 9.2 s); server RSS max 46.8 / 61.2 / 61.4 MB (Day 3 VM: 44.9 / 58.6 / 58.5)
+
+### Next person should start with
+
+Day 4 part 2 below, **all on the one reference VM** (team decision: every final table from the same machine, with `check.py`'s timer drift < 10%). On that VM, re-run the bandwidth table above with `--apply` (the VM has `sch_prio`) before putting it in the report.
+
+Claude suggestion I rejected: Day 3's "probe with one segment's provisionals" for slow-reader recovery (it can't detect a slow reader, see above), and my own first version, which shortened the reader wait to 10 s for everyone (cost T3 finals: 98.3% on the 40 s gate run).
+
+## Day 4 (part 2) — TBD
+
+To pick up (in this order), **on one VM**:
+1. T1–T5 x3 on one VM with timer drift < 10% (`check.py --full --runs 3` for T1–T4 + late join; T5 with `network_profiles/` + `run_demo.py --runs 3`). T5 has never been run with the Day 4 policy: profiles with ≥ 50 ms RTT will classify any lag as "slow link" (10 s recovery), so check coverage there.
+2. `bandwidth_test.py --apply --clients 500 --duration 60 --runs 3` (before/after table for the report), `convergence_test.py --runs 3` and `--slow-until 90 --duration 230`, `check.py --stress --runs 3`, 5-minute memory run with `monitor_server.py`.
 3. Charts, README, report draft.
