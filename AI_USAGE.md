@@ -61,6 +61,18 @@
   3. It added a "send blocked > 50 ms = congested link" mode with `TCP_NOTSENT_LOWAT`. A debug counter showed it never fired in three 500-client runs (the backlog sits in the shaper's shared queue, not in our socket), so the mode was removed. The small buffers stayed because a with/without run showed they help on their own.
 - **What I checked myself:** TODO (Frankfurters: read the diff and the "Why not for readers" paragraph in `HANDOFF.md` until you can explain the ping budget, the RTT classifier and why slow readers keep 60 s without notes).
 
+### Day 4 part 2 (Frankfurters) — reference-VM runs, two lag-policy fixes
+
+- **Tool:** Claude Code (Claude Opus 5.5), local session on the reference VM.
+- **Used for:** running T1–T5 x3, bandwidth before/after, convergence, stress and the 5-minute memory run; diagnosing two failures those runs exposed; fixing them in `liverecall/channel.py` with unit tests.
+- **Useful suggestions:**
+  1. When T3 (60 s) lost finals in 2 of 3 runs, it matched the clients that lost finals against the `[stats]` `lagging` count per 10 s instead of re-running. The clients that left lag mode early were exactly the ones that lost tail finals, which pointed straight at Part 1's ±50% jitter turning the 60 s reader wait into 30 s. Fix: jitter upward only for readers (60–90 s).
+  2. On public T5 (`delay_loss`) it ran the plain-FIFO baseline on the same profile before proposing a fix. That showed our 93.5% coverage bought nothing (FIFO 99.97%, same P95), so the lag entries were false positives (retransmits delaying one pong) rather than a trade-off.
+- **Suggestions that were wrong or changed:**
+  1. Its first T5 fix (two late pongs in a row before a "slow link" lag) fixed T5 but, measured per run rather than by median, cost the bandwidth challenge: fresh finals 53% → 16%, one run 98.97% finals and 14 failed handshakes. The median alone hid the bad run. Changed to "a relapse on a link already confirmed slow is believed at the first late pong", which kept both (T5 coverage 99.93%, bandwidth fresh finals 50%, 100% finals in every run).
+  2. Its first two attempts at the 5-minute memory run measured the wrong process: `pgrep -f solution_server.py` matched the shell running the command (3.6 MB flat, which looks like perfect boundedness). Caught because 3.6 MB is too small for a Python server; fixed by matching `python -u solution_server.py` from a script file.
+- **What I checked myself:** TODO (Frankfurters).
+
 ## Tools used
 
 TODO (final): list all tools across the team.

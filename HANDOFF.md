@@ -458,9 +458,108 @@ Day 4 part 2 below, **all on the one reference VM** (team decision: every final 
 
 Claude suggestion I rejected: Day 3's "probe with one segment's provisionals" for slow-reader recovery (it can't detect a slow reader, see above), and my own first version, which shortened the reader wait to 10 s for everyone (cost T3 finals: 98.3% on the 40 s gate run).
 
-## Day 4 (part 2) — TBD
+## Day 4 (part 2) — Frankfurters — reference-VM runs + two lag-policy fixes
 
-To pick up (in this order), **on one VM**:
-1. T1–T5 x3 on one VM with timer drift < 10% (`check.py --full --runs 3` for T1–T4 + late join; T5 with `network_profiles/` + `run_demo.py --runs 3`). T5 has never been run with the Day 4 policy: profiles with ≥ 50 ms RTT will classify any lag as "slow link" (10 s recovery), so check coverage there.
-2. `bandwidth_test.py --apply --clients 500 --duration 60 --runs 3` (before/after table for the report), `convergence_test.py --runs 3` and `--slow-until 90 --duration 230`, `check.py --stress --runs 3`, 5-minute memory run with `monitor_server.py`.
-3. Charts, README, report draft.
+### Status: all Day 4 part 2 runs DONE on one VM; two policy bugs found and fixed; charts/README/report next (Day 5)
+
+> **Environment for every number in this section:** Ubuntu 26.04.1 LTS VM on Apple Silicon (aarch64, **2 vCPU**, 5 GB), Linux 7.0, Python 3.14.4 venv, websockets 16.1.1, **asyncio timer drift +0–1%** (measured before every `check.py`/`bandwidth_test.py` run). Not the Mininet lab VM (4 vCPU); this VM is the team's single reference machine for the report tables. `tc` with `sch_prio`/`sch_tbf`/`sch_netem`, passwordless `sudo tc` only (`/etc/sudoers.d/liverecall-tc`). Raw output: `results/day4p2/` (gitignored); final-code JSONs for T1–T4 in `results/day4p2/final/`.
+
+`pytest`: 116 passed (1 browser test skipped: no Firefox). `python check.py --full --runs 3`: GATE PASSED, all 15 runs, on the final code.
+
+### Fix 1: slow-reader recovery jitter only upwards (`_check_lag`)
+
+T3 at its public 60 s duration failed the gate in 2 of 3 runs (99.96%, 99.83% finals). The missing finals were always the **last 1–6 segments of slow clients**, and the clients that lost them were exactly the ones whose `[stats]` showed them leaving lag at ~35–50 s. Part 1's ±50% jitter applied to readers too, so the 60 s reader wait was really 30–90 s: a still-slow reader retried full delivery inside the run, refilled its 16-message read-ahead, and the run ended before it drained (the mechanism Part 1 measured with a 10 s wait). Now: slow link `link_recover_s × U(0.5, 1.5)` as before, slow reader `recover_s × U(1, 1.5)` (60–90 s). T3 x3 after the fix: 100 / 100 / 100%, no reader leaves lag inside 60 s. Cost: a reader that speeds up gets full delivery back after ~66 s instead of ~45 s (convergence below). Test: `test_recover_wait_jitter_stays_in_bounds` (both causes).
+
+### Fix 2: a "slow link" lag must be confirmed (`LINK_STRIKES`, `LINK_CONFIRM_S`, `_link_confirmed`)
+
+T5 had never run with the Day 4 policy. On the **public T5 profile** (`delay_loss.sh`: 120 ± 30 ms each way, 3% loss) the lag-aware server had ~30–35 lag entries per run, **all classified "slow link"**, and coverage 93.5% vs the plain FIFO's 99.97% on the same profile, for *no* freshness gain (P95 736 vs 691 ms, fresh 89.4 vs 89.8%). A lost segment's retransmit holds one pong past `LAG_S = 1 s`, and the ~240 ms RTT is above `LINK_RTT_S`, so each one-off retransmit started coalescing for 5–15 s. Congestion delays *every* pong; a retransmit delays one. So:
+- a first slow-link lag needs **2 overdue pongs in a row** (`LINK_STRIKES = 2`; an on-time pong resets the count), or one pong overdue > `LINK_CONFIRM_S = 3 s` (the sender wakes itself for that);
+- a **relapse on a link already confirmed slow** (within `REARM_S`) is believed at the first late pong;
+- slow readers are unchanged (enter at the first late pong).
+
+The relapse rule was added after measuring the strike rule alone, per run and not only the median: it fixed T5 but on the 2 Mbit/s test every 10 s retry flooded the link for ~2 s: fresh finals 53% → 16%, P50 509 → 772 ms, one run 98.97% finals with 14 failed handshakes. With the relapse rule both hold (tables below). Tests: `test_one_late_pong_on_slow_link_is_not_lag`, `test_consecutive_late_pongs_on_slow_link_enter_lag`, `test_one_very_late_pong_on_slow_link_enters_lag`, `test_slow_reader_still_enters_lag_at_first_late_pong`, `test_link_relapse_enters_lag_at_first_late_pong`; the existing slow-link tests pass `link_strikes=1`.
+
+### Public tests T1–T4 + late join (`python check.py --full --runs 3`, final code, median of 3)
+
+| median of 3, public durations | T1 (20) | T2 (100) | T3 (10% slow) | T4 (20% drop 5 s) | late join (20%) |
+|---|---:|---:|---:|---:|---:|
+| final completeness % | 100 | 100 | 100 | 100 | 100 |
+| normal update coverage % | 100 | 100 | 94.6 | 98.3 | 92.2 |
+| P50 / P95 / P99 caption age (ms) | 2.6 / 5.6 / 7.5 | 6.6 / 14.3 / 17.5 | 6.3 / 20.0 / 7598 | 7.4 / 13.7 / 17.0 | 7.0 / 13.4 / 17.3 |
+| fresh / fresh finals % | 100 / 100 | 100 / 100 | 96.4 / 93.2 | 100 / 98.4 | 100 / 92.7 |
+| T3 normal / slow P95 (ms) | | | 12.3 / 9615 | | |
+| recovery P50 / P95 (ms) | | | | 3.1 / 5.3 | P95 1.5–3.4 |
+| dup / stale / connection errors | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| server RSS max (MB) | ~30 | ~37 | ~37 | ~38 | ~36 |
+
+T4 / late-join coverage < 100% is by design (disconnected / late clients get missed segments as finals via HISTORY, not their provisionals). T3 coverage: slow readers' provisionals are coalesced.
+
+### T5 network impairment (`network_profiles/<p>.sh lo` + `run_demo.py --clients 100 --duration 40 --runs 3`, median of 3)
+
+| profile | final % | coverage % | P50 / P95 / P99 (ms) | fresh / fresh finals % | dup / stale / errors | lag entries per run |
+|---|---:|---:|---:|---:|---:|---:|
+| `delay_loss` (public T5), final code | 100 | **99.93** | 262 / 770 / 1103 | 87.8 / 86.1 | 0 / 0 / 0 | 0–1 (link) |
+| `delay_loss`, Part 1 code | 100 | 93.5 | 259 / 736 / 1052 | 89.4 / 89.6 | 0 / 0 / 0 | ~30–35 (all link) |
+| `delay_loss`, plain FIFO | 100 | 99.97 | 254 / 691 / 1022 | 89.8 / 88.8 | 0 / 0 / 0 | 0 |
+| `delay_100ms` | 100 | 100 | 204 / 251 / 270 | 100 / 100 | 0 / 0 / 0 | 0 |
+| `loss_3pct` | 100 | 99.97 | 7.6 / 16.9 / 217 | 99.99 / 99.98 | 0 / 0 / 0 | ≤ 2 (reader) |
+| `reorder` | 100 | 100 | 49 / 56 / 57 | 100 / 100 | 0 / 0 / 0 | 0 |
+
+`delay_100ms`, `loss_3pct`, `reorder` ran after fix 1 and before fix 2; they had no slow-link lag entries, so fix 2 cannot change them. Caption age under `delay_loss` is dominated by the 120 ms one-way delay plus TCP retransmits (P99 ~1 s) in every configuration; the application layer cannot remove it. `lo` was reset after every profile.
+
+### Constrained bandwidth: before/after (`python bandwidth_test.py --apply --clients 500 --duration 60 --runs 3`, interleaved, median of 3)
+
+| 500 clients, 2 Mbit/s tbf on the server port | plain FIFO (before) | lag-aware, Part 1 code | **lag-aware, final** |
+|---|---:|---:|---:|
+| final completeness % (per run) | 98.1 (98.1 / 98.7 / 97.4) | 100 (100 / 100 / 100) | **100 (100 / 100 / 100)** |
+| normal update coverage % | 97.9 | 52.8 | 57.9 |
+| P50 / P95 / P99 caption age (ms) | 1117 / 1593 / 2466 | 509 / 1138 / 1484 | **535 / 1295 / 1914** |
+| fresh captions / fresh finals % | 0 / 0 | 49.4 / 52.7 | **47.1 / 50.1** |
+| connection errors (per run) | 1 / 0 / 1 | 0 / 0 / 0 | 0 / 1 / 5 |
+| hopeless closes / dup / stale | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| tbf drops | 37.3k | 7.7k | 11.3k |
+| lagging peak / slow-link lag entries | 0 / 0 | 465 / 1110 | 383 / 932 |
+| server RSS max (MB) | 65.7 | 67.1 | 66.6 |
+
+The FIFO column is from the final-code run (`--tag _day4p2fix3`); the FIFO path does not use the lag policy. This reproduces Part 1's container result with the real `--apply` shaper (`prio` classifier). The final code beats the plain queue on completeness and every freshness metric; the trade-off is coverage (58 vs 98%). Fix 2 costs ~150 ms of P95 and a few client handshake timeouts in the first second (500 clients connecting onto a full link while a first lag entry now takes ~1 s longer to confirm); every client reconnected and got all finals.
+
+### Convergence (`python convergence_test.py --runs 3`, and `--slow-until 90 --duration 230` x1)
+
+| 100 + 10 converging, slow 30 s of 120 s, median of 3 | plain FIFO | lag-aware |
+|---|---:|---:|
+| finals / dup / stale / errors | 100% / 0 / 0 / 0 | 100% / 0 / 0 / 0 |
+| normal clients P95 | 13.2 ms | 13.8 ms |
+| converging: slow-phase P95 / backlog at switch | 13.6 s / 14.6 s | **9.9 s / 6.1 s** |
+| converging: fresh again after switch | 0.20 s | 0.19 s |
+| converging: full delivery again after switch | **0.2 s** | 65.9 s (62–73) |
+| normal update coverage | 100% | 95.6% |
+
+230 s case (slow 90 s): FIFO slow-phase P95 42.1 s, backlog 44.6 s at the switch, **10 connection errors** (keepalive closes, recovered by HISTORY); lag-aware 9.3 s, backlog 17 ms, 0 errors, full delivery 4.8 s after the switch. Both 100% finals. Run after fix 1, before fix 2; 0 slow-link lag entries in every convergence run, so fix 2 does not affect these numbers. Fix 1 is why full delivery returns at ~66 s rather than Part 1's 45 s.
+
+### Stress (`python check.py --stress --runs 3`, final code)
+
+All 9 runs PASS. s300 / s500 / s500slow: 100% finals, 0 dup/stale/hopeless closes; P95 29.5 / 42.7 ms / normal 39.0 ms (slow 9.1 s); coverage 100 / 100 / 95.1%; RSS max 52 / 67 / 67 MB. On 2 vCPU the 500-client load generator shares the machine with the server, so these are upper bounds on server latency.
+
+### 5-minute memory run (100 clients, 10% slow at 500 ms, 300 s; `monitor_server.py --pid <server> --interval 1`, final code)
+
+| 300 s, T3 conditions, 1 run each | plain FIFO (before) | lag-aware (after) |
+|---|---:|---:|
+| server RSS first → max | 36.9 → 37.4 MB | 36.9 → 37.1 MB |
+| final completeness | **98.39%** | **99.87%** |
+| slow-client P95 | 47.1 s | 9.2 s |
+| normal-client P95 | 12.4 ms | 14.0 ms |
+| connection errors | 20 | 0 |
+
+Memory is flat in both; server history plateaus at 120 finals after ~90 s (`[stats] history=`). **Known limitation, not fixed:** the lag-aware server's 0.13% missing finals are the last 1–13 segments of 8 slow readers that were still slow. Over 5 minutes they retry full delivery after 60–90 s and 120–180 s after each relapse, and a retry within ~30 s of the end leaves a backlog a 2 msg/s reader cannot drain before the clients stop. Any policy that ever retries full delivery for a reader has this end-of-window cost (Part 1: the server cannot tell a recovered reader from a slow one without trying); the FIFO loses 12× more and drops below the 99% cap. Longer reader waits would trade it for later coverage recovery. Measurement note: `pgrep -f solution_server.py` run from a shell whose own command line contains that string matches the shell (3.6 MB flat); match `python -u solution_server.py` from a script file.
+
+### Numbers today (median of 3), Ubuntu 26.04 VM (Apple Silicon, 2 vCPU), timer drift +1%
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients):  P50 6.6 ms, P95 14.3 ms, P99 17.5 ms, completeness 100%
+- T3 (10% slow):     normal P95 12.3 ms, slow P95 9615 ms, completeness 100%
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, recovery P50 3.1 ms
+- T5 (delay_loss):   P50 262 ms, P95 770 ms, completeness 100%, coverage 99.93%
+
+### Next person should start with
+Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), report draft, from the tables in this section. Open for the team: re-running stress on the 4-vCPU Mininet VM; the end-of-window tail-loss trade-off above.
+
+Claude suggestions I rejected: the strike rule without the relapse exception (cost the bandwidth challenge, see fix 2); trusting the first memory run (it measured a shell).
