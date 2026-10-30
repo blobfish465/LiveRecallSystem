@@ -15,7 +15,7 @@ from liverecall.state import CaptionState
 def fresh_server_state(monkeypatch):
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
     monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
-                        {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0})
+                        {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0})
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()
@@ -249,12 +249,12 @@ def test_stats_totals_survive_disconnect():
             await hello(cl)
             await wait_for_state(lambda: len(solution_server.CHANNELS) == 1)
             (channel,) = solution_server.CHANNELS
-            channel.coalesced, channel.lag_entries = 5, 2
+            channel.coalesced, channel.lag_entries, channel.link_lag_entries = 5, 2, 1
             assert "coalesced_total=5 lag_entries_total=2" in solution_server.stats_line()
         await wait_for_state(lambda: solution_server.CLOSED_TOTALS["coalesced"] == 5)
         line = solution_server.stats_line()
         assert "clients=0 " in line
-        assert "coalesced_total=5 lag_entries_total=2 hopeless_closes_total=0" in line
+        assert "coalesced_total=5 lag_entries_total=2 link_lag_entries_total=1 hopeless_closes_total=0" in line
         server.close()
         await server.wait_closed()
 

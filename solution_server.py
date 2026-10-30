@@ -27,6 +27,8 @@ import argparse
 import asyncio
 import json
 import os
+import socket
+import struct
 import time
 from typing import Any
 
@@ -45,14 +47,60 @@ STATS_INTERVAL_S = 10.0
 # detection, coalescing or hopeless cap. Set by --no-coalesce, or by
 # LIVERECALL_NO_COALESCE=1 because run_demo.py starts us with --port only.
 NO_COALESCE = False
+# Per-client send buffers for the lag-aware server (not the baseline, so before/after
+# runs keep Day 3's baseline). At 500 clients on a 2 Mbit/s link each client's share
+# is ~500 B/s, so every KiB queued below our channel is ~2 s of caption age, and our
+# pings wait behind it too (late pongs, needless lag). TCP_NOTSENT_LOWAT caps the
+# bytes the kernel holds unsent; WRITE_HIGH is asyncio's write-buffer high-water
+# mark (send() waits above it). Measured on the 500-client run (1 run each): with
+# them 100% finals, P50 213 ms; without (kernel default, 4 KiB) 98.7%, P50 547 ms.
+NOTSENT_LOWAT = 512
+WRITE_HIGH = 512
 # Counters of channels that have closed, so the [stats] totals survive disconnects.
-CLOSED_TOTALS = {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0}
+CLOSED_TOTALS = {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0}
 
 
 def _spawn(coro) -> None:
     task = asyncio.create_task(coro)
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
+
+
+def tighten_send_path(ws) -> None:
+    """Small kernel + asyncio send buffers for this client (see NOTSENT_LOWAT)."""
+    transport = ws.transport
+    sock = transport.get_extra_info("socket")
+    lowat = getattr(socket, "TCP_NOTSENT_LOWAT", None)  # Linux and macOS
+    if sock is not None and lowat is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, lowat, NOTSENT_LOWAT)
+        except OSError:
+            pass  # e.g. not a TCP socket; flow control then works as before
+    transport.set_write_buffer_limits(high=WRITE_HIGH)
+
+
+_TCP_INFO = getattr(socket, "TCP_INFO", None)  # Linux only
+
+
+def kernel_rtt(ws):
+    """Callable giving the socket's smoothed TCP RTT in seconds, or None if unknown.
+
+    The kernel measures it from ACKs, which the client's kernel sends whether or not
+    the client app reads, so it tells a slow link (high RTT) from a slow reader
+    (late pong, low RTT). No network cost: one getsockopt per lag decision.
+    """
+    sock = ws.transport.get_extra_info("socket")
+    if sock is None or _TCP_INFO is None:
+        return None
+
+    def rtt() -> float | None:
+        info = sock.getsockopt(socket.IPPROTO_TCP, _TCP_INFO, 104)
+        if len(info) < 72:
+            return None
+        # struct tcp_info: 8 bytes of u8 fields, then u32s; tcpi_rtt (µs) is the 16th.
+        return struct.unpack_from("I", info, 68)[0] / 1e6
+
+    return rtt
 
 
 def broadcast(caption) -> None:
@@ -110,8 +158,9 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow,
                                 hopeless_s=float("inf"))
     else:
+        tighten_send_path(ws)
         channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow,
-                                ping=ws.ping)
+                                ping=ws.ping, rtt=kernel_rtt(ws))
 
     # --- atomic section: no await between snapshot and registration ---------
     items = STATE.history_for(last_segment, last_revision, hello.get("history_seconds"))
@@ -138,6 +187,7 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         sender.cancel()
         CLOSED_TOTALS["coalesced"] += channel.coalesced
         CLOSED_TOTALS["lag_entries"] += channel.lag_entries
+        CLOSED_TOTALS["link_lag_entries"] += channel.link_lag_entries
         CLOSED_TOTALS["hopeless_closes"] += channel.overflowed
         print(f"client disconnected: id={client_id}; clients={len(CHANNELS)}", flush=True)
 
@@ -175,12 +225,14 @@ def stats_line() -> str:
     live = list(CHANNELS)
     coalesced = CLOSED_TOTALS["coalesced"] + sum(c.coalesced for c in live)
     lag_entries = CLOSED_TOTALS["lag_entries"] + sum(c.lag_entries for c in live)
+    link_lag = CLOSED_TOTALS["link_lag_entries"] + sum(c.link_lag_entries for c in live)
     return (
         f"[stats {time.strftime('%H:%M:%S')}] clients={len(live)} "
         f"lagging={sum(c.lagging for c in live)} "
         f"history={STATE.history_len} active={STATE.active_len} "
         f"max_pending={max((c.pending for c in live), default=0)} "
         f"coalesced_total={coalesced} lag_entries_total={lag_entries} "
+        f"link_lag_entries_total={link_lag} "
         f"hopeless_closes_total={CLOSED_TOTALS['hopeless_closes']}"
     )
 
@@ -191,9 +243,9 @@ async def main_async(port: int) -> None:
         "0.0.0.0",
         port,
         max_size=2**20,
-        # Default 32 KiB. Smaller makes send() block sooner on a congested link,
-        # so the backlog stays in our outbox, where it can be coalesced, instead
-        # of in the socket's write buffer, where it can't.
+        # Default 32 KiB. Day 2 lowered it so a congested link's backlog stays
+        # in our outbox (Day 3: no measurable effect on its own). Kept for the
+        # --no-coalesce baseline; lag-aware clients get tighten_send_path().
         write_limit=4096,
         ping_interval=20,
         ping_timeout=20,

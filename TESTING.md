@@ -19,7 +19,7 @@ python -m pytest -q
 | File | Covers |
 |---|---|
 | `tests/test_state.py` | revision rules, final durability, malformed/unknown fields, variable revision counts (1/2/3/8), history bounded by time + count, evicted-segment rejection, active-segment cap, 1-hour boundedness, HISTORY selection (fresh vs resume, 60 s clamp, ordering, finals only) |
-| `tests/test_channel.py` | control-first ordering, full delivery when not lagging, opt-in coalescing (in place, finals/control never replaced), lag detection by late pong (finals/control only, stop-and-wait), compaction on lag entry (no provisional after its final), recovery after fast pongs + backoff on relapse, hopeless cap (age + count) closes, send failure, offer() never blocks |
+| `tests/test_channel.py` | control-first ordering, full delivery when not lagging, opt-in coalescing (in place, finals/control never replaced), lag detection by late pong (finals/control only, sent without waiting for pongs), ping budget, lag cause from kernel RTT (slow link vs slow reader) and its recovery wait, recovery jitter bounds, compaction on lag entry (no provisional after its final), recovery after fast pongs + backoff on relapse (never below the cause's base), hopeless cap (age + count + unanswered ping, not on a slow link) closes, send/pong failure, offer() never blocks |
 | `tests/test_server.py` | real WebSockets in-process: late join HISTORY→live, resume sends only missed finals, 30 clients joining during a burst see every final exactly once (atomic snapshot+register), source garbage/unknown types/SOURCE_DONE ignored, bad hello → 1008, abrupt client drop doesn't affect others |
 
 ## 2. Regression gate on the public harness (minutes)
@@ -108,4 +108,5 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 - [x] Day 3: bandwidth-test script + runs (section 3; results in `HANDOFF.md`)
 - [x] Day 3: `check.py --stress` (section 2; medians in `HANDOFF.md`)
 - [x] Day 3: slow-then-fast convergence client (section 4)
-- [ ] Day 4: bandwidth policy fix + re-run section 3; T5 tc/netem x3; 5-minute memory run with `monitor_server.py`
+- [x] Day 4: bandwidth policy fix + re-run section 3 (cloud container, median of 3; re-run on the reference VM)
+- [ ] Day 4: T5 tc/netem x3; 5-minute memory run with `monitor_server.py`

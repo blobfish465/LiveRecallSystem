@@ -36,7 +36,8 @@ def test_only_wins_over_stress():
 def test_stats_lines_give_peaks_and_final_totals():
     assert check.parse_stats(STATS_LOG) == {
         "stats_lines": 2, "lagging_max": 490, "max_pending_max": 5,
-        "coalesced_total": 20210, "lag_entries_total": 490, "hopeless_closes_total": 1,
+        "coalesced_total": 20210, "lag_entries_total": 490, "link_lag_entries_total": 0,
+        "hopeless_closes_total": 1,
     }
 
 
