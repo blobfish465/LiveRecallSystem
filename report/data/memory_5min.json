@@ -1,0 +1,79 @@
+{
+ "after": {
+  "clients": 100,
+  "live_caption_messages": 111608,
+  "recovered_history_items": 0,
+  "accepted": 111608,
+  "recovered": 0,
+  "duplicates": 0,
+  "stale": 0,
+  "invalid_history_nonfinal": 0,
+  "connections": 100,
+  "connection_errors": 0,
+  "p50_ms": 7.921,
+  "p95_ms": 14.725,
+  "p99_ms": 4948.869259999992,
+  "fresh_pct": 98.17307003082216,
+  "fresh_final_pct": 96.54040404040404,
+  "fresh_final_count": 38230,
+  "fresh_final_denominator": 39600,
+  "unique_finals": 39547,
+  "expected_finals_total": 39600,
+  "final_completeness_pct": 99.86616161616162,
+  "unique_live_revisions": 111608,
+  "expected_updates_total": 118800,
+  "normal_update_coverage_pct": 93.94612794612794,
+  "normal_clients": {
+   "messages": 106920,
+   "p50_ms": 7.838,
+   "p95_ms": 13.962,
+   "fresh_pct": 100.0
+  },
+  "slow_clients": {
+   "messages": 4688,
+   "p50_ms": 13.4595,
+   "p95_ms": 9155.53835,
+   "fresh_pct": 56.505972696245735
+  }
+ },
+ "before_fifo": {
+  "clients": 100,
+  "live_caption_messages": 112850,
+  "recovered_history_items": 1352,
+  "accepted": 112850,
+  "recovered": 1352,
+  "duplicates": 0,
+  "stale": 0,
+  "invalid_history_nonfinal": 0,
+  "connections": 120,
+  "connection_errors": 20,
+  "p50_ms": 6.472,
+  "p95_ms": 2556.05225,
+  "p99_ms": 40161.32205,
+  "fresh_pct": 94.78068232166594,
+  "fresh_final_pct": 90.05050505050505,
+  "fresh_final_count": 35660,
+  "fresh_final_denominator": 39600,
+  "unique_finals": 38963,
+  "expected_finals_total": 39600,
+  "final_completeness_pct": 98.39141414141415,
+  "unique_live_revisions": 112850,
+  "expected_updates_total": 118800,
+  "normal_update_coverage_pct": 94.99158249158249,
+  "normal_clients": {
+   "messages": 106920,
+   "p50_ms": 6.246,
+   "p95_ms": 12.435,
+   "fresh_pct": 100.0
+  },
+  "slow_clients": {
+   "messages": 5930,
+   "p50_ms": 24816.446,
+   "p95_ms": 47144.893400000015,
+   "fresh_pct": 0.6745362563237775
+  },
+  "recovery_count": 20,
+  "recovery_p50_ms": 2.8235,
+  "recovery_p95_ms": 4.619700000000001
+ }
+}
