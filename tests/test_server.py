@@ -261,3 +261,20 @@ def test_stats_totals_survive_disconnect():
         await server.wait_closed()
 
     asyncio.run(main())
+
+
+def test_listening_socket_caps_segment_size():
+    """Loopback's 64 KiB MTU + the public tbf (burst 4000 B) stall any larger segment for good."""
+    import socket
+    sock = solution_server.listening_socket(0)
+    try:
+        maxseg = getattr(socket, "TCP_MAXSEG", None)
+        if maxseg is None:
+            pytest.skip("TCP_MAXSEG not available on this platform")
+        try:
+            value = sock.getsockopt(socket.IPPROTO_TCP, maxseg)
+        except OSError:
+            pytest.skip("TCP_MAXSEG not readable on this platform")
+        assert 0 < value <= solution_server.MAX_SEGMENT < 4000
+    finally:
+        sock.close()

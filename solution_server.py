@@ -250,11 +250,35 @@ def stats_line() -> str:
     )
 
 
+# Largest TCP segment (MSS) on our connections, set on the listening socket so it is
+# in place before any handshake and is announced to clients. Loopback's MTU is 64 KiB,
+# so without it one large message (a 60 s HISTORY of real text, ~6+ KB compressed)
+# leaves as one segment, and the public bandwidth profile's tbf (burst 4000 B) drops
+# any packet larger than its burst every time: the connection stalls for good.
+# hidden_sim bw2m_late_long: all 60 clients joining at 70 s got no HISTORY and no
+# captions (103 connects, 32 hopeless closes, 80% finals). 1400 B is about what an
+# Ethernet path gives anyway, so this only changes loopback behaviour.
+MAX_SEGMENT = 1400
+
+
+def listening_socket(port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name == "posix":  # what asyncio.create_server sets; on Windows it would allow port stealing
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    maxseg = getattr(socket, "TCP_MAXSEG", None)
+    if maxseg is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, maxseg, MAX_SEGMENT)
+        except OSError:
+            pass  # not supported here (e.g. some Windows versions): keep the default
+    sock.bind(("0.0.0.0", port))
+    return sock
+
+
 async def main_async(port: int) -> None:
     async with serve(
         handler,
-        "0.0.0.0",
-        port,
+        sock=listening_socket(port),
         max_size=2**20,
         # Default 32 KiB. Day 2 lowered it so a congested link's backlog stays
         # in our outbox (Day 3: no measurable effect on its own). Kept for the
