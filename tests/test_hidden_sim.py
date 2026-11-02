@@ -106,3 +106,10 @@ def test_finals_due_counts_a_segment_nobody_received_before_a_due_one():
     rows = [frow(0, 1, 10), frow(0, 3, 30)]  # nobody got segment 2, but 3 was due
     m = hs.finals_due(rows, segments=3, end_epoch=100, grace_s=3)
     assert m["finals_due_segments"] == 3 and m["finals_due_pct"] == pytest.approx(200 / 3)
+
+
+def test_unique_transcript_never_repeats_and_is_deterministic(tmp_path):
+    a = hs.unique_transcript(tmp_path / "a.txt", 200).read_text(encoding="utf-8").splitlines()
+    b = hs.unique_transcript(tmp_path / "b.txt", 200).read_text(encoding="utf-8").splitlines()
+    assert a == b and len(a) == len(set(a)) == 200
+    assert all(len(line.split()) >= 4 for line in a)  # caption_source makes 3 revisions from >= 4 words

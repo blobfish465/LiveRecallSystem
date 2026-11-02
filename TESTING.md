@@ -90,15 +90,17 @@ covers the metric definitions. Results: `results/convergence_*` (gitignored); nu
 ## 4b. Hidden-evaluation variations (`hidden_sim.py`; Linux, shaped scenarios need root for `tc`)
 
 ```bash
-python hidden_sim.py --list                     # the 13 scenarios
+python hidden_sim.py --list                     # the 18 scenarios
 python hidden_sim.py                            # all, before (plain FIFO) + after (ours), ~30 min
-python hidden_sim.py --only adv2 --runs 3       # one component (adv1 | adv2 | recon) or scenario names
+python hidden_sim.py --only adv2 --runs 3       # one component (adv1 | adv2 | recon | delay) or scenario names
 ```
 
 More settings for the three harder hidden components than the public tests give. Every scenario stays inside the teaching team's 2 Nov bounds: no reader slower than the finals stream, no link narrower than finals need.
 - **adv1 (slow readers):** 30% slow; readers at 250 ms and 700 ms; a 3× faster source with 150 ms readers.
 - **adv2 (bandwidth):** 1 Mbit/s with 250 clients; 2 Mbit/s combined with 10% slow readers or with 1% loss; the limit lifted after 30 s (catch-up); reconnects and 60 s late joins under the limit.
 - **recon:** 100% of clients reconnecting at once; 50% away for 30 s; 20% away for 75 s; reconnects on the T5 link.
+- **recon / adv2, large HISTORY:** non-repeating text with joins at 55 s asking 60 s, unshaped and on 2 Mbit/s (a big HISTORY reply on the shaped link: see the MSS cap in `HANDOFF.md`).
+- **delay:** 300 ± 100 ms each way, alone, with 3% loss, and with 10% slow readers.
 
 How it runs:
 - Same machinery as `convergence_test.py`: the public client code imported unmodified, roles assigned per client, the public source with its own `--revision-delay/--segment-gap`, and `analyse_results`.

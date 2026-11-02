@@ -6,11 +6,12 @@ The public tests run each hard challenge at one setting (T3: 10% readers at
 hidden evaluator "may vary and combine" client count, delay/jitter/loss, slow
 reader share and rate, disconnects and simultaneous reconnects, caption rate and
 burstiness, and bandwidth. This tool runs a matrix of such variations for the
-three harder components:
+three harder components, plus delay/loss beyond T5:
 
   adv1  slow-reader semantic backpressure      (6 marks)
   adv2  constrained-bandwidth semantic delivery (6 marks)
   recon reconnect and catch-up recovery         (4 marks)
+  delay delay/loss tail freshness               (2 marks)
 
 Every scenario stays inside the teaching team's stated bounds (2 Nov): no reader
 is permanently slower than the finals stream alone (~1.33 finals/s at the public
@@ -48,6 +49,7 @@ import csv
 import json
 import math
 import os
+import random
 import socket
 import statistics
 import subprocess
@@ -107,6 +109,10 @@ class Scenario:
     segment_gap: float = PUBLIC_SEGMENT_GAP
     shape: Shape | None = None
     shape_until: float | None = None  # seconds after the clients start; None = the whole run
+    # The public transcript repeats 10 sentences, so permessage-deflate shrinks any HISTORY
+    # reply to almost nothing. unique_text feeds the source sentences that never repeat
+    # (see unique_transcript), so HISTORY compresses like real lecture text.
+    unique_text: bool = False
 
 
 SCENARIOS: list[Scenario] = [
@@ -137,8 +143,49 @@ SCENARIOS: list[Scenario] = [
              disc_pct=20, disc_at=10, disc_s=75, duration=100),
     Scenario("reconnect_loss", "recon", "20% drop for 5 s on the public T5 link (120+-30 ms, 3% loss)",
              disc_pct=20, shape=Shape(delay_ms=120, jitter_ms=30, loss_pct=3)),
+    Scenario("late_long_text", "recon",
+             "unique text; 20% drop at 70 s for 5 s, 20% join at 55 s asking 60 s (large HISTORY), 100 s",
+             disc_pct=20, disc_at=70, late_pct=20, late_at=55, history_seconds=60, duration=100,
+             unique_text=True),
+    # Large HISTORY replies on a shaped link: on loopback (MTU 65536) tbf drops any packet
+    # larger than its 4000-byte burst, so one big uncompressed message could stall a
+    # connection for good (Day 3). Joins at 55 s ask for 60 s (~70 finals, all of them so far).
+    Scenario("bw2m_late_long", "adv2",
+             "2 Mbit/s, 300 clients, unique text; 20% drop at 70 s for 5 s, 20% join at 55 s asking 60 s, 100 s",
+             clients=300, disc_pct=20, disc_at=70, late_pct=20, late_at=55, history_seconds=60,
+             duration=100, unique_text=True, shape=Shape(rate="2mbit")),
+    # ---- delay: delay/loss tail freshness beyond T5 (120+-30 ms each way, 3% loss) -------
+    # LAG_S = 1 s treats a later pong as lag; a 600 ms RTT plus retransmits tests that margin.
+    Scenario("delay300", "delay", "300+-100 ms each way (RTT ~600 ms)",
+             shape=Shape(delay_ms=300, jitter_ms=100)),
+    Scenario("delay300_loss", "delay", "300+-100 ms each way + 3% loss",
+             shape=Shape(delay_ms=300, jitter_ms=100, loss_pct=3)),
+    Scenario("delay300_slow", "delay", "300+-100 ms each way + 10% slow readers at 500 ms",
+             slow_pct=10, shape=Shape(delay_ms=300, jitter_ms=100)),
 ]
-COMPONENTS = {"adv1": "slow-reader backpressure", "adv2": "constrained bandwidth", "recon": "reconnect and catch-up"}
+COMPONENTS = {"adv1": "slow-reader backpressure", "adv2": "constrained bandwidth",
+              "recon": "reconnect and catch-up", "delay": "delay/loss tail freshness"}
+
+_WORDS = ("packet segment window router switch frame header payload socket latency jitter "
+          "bandwidth congestion retransmit acknowledgement handshake checksum sequence buffer queue "
+          "stream datagram protocol address gateway subnet mask prefix tunnel cipher session cookie "
+          "server client proxy cache resolver record lease broadcast multicast anycast hop metric "
+          "path link layer fragment offset timeout backoff jitter scheduler token credit").split()
+
+
+def unique_transcript(path: Path, n: int, seed: int = 3103) -> Path:
+    """n sentences of 12-18 words that never repeat (numbers keep each one distinct), so
+    permessage-deflate cannot shrink a long HISTORY reply the way it shrinks the public
+    transcript's 10 repeated sentences."""
+    rng = random.Random(seed)
+    lines = []
+    for i in range(n):
+        words = [rng.choice(_WORDS) for _ in range(rng.randint(12, 18))]
+        words.insert(rng.randrange(len(words)), f"{rng.randint(100, 99999)}")
+        lines.append(f"Point {i + 1}: " + " ".join(words) + ".")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------- pure helpers
@@ -294,11 +341,13 @@ async def drive(sc: Scenario, args, uri: str, csv_path: Path, log_fp, server_pid
         helpers.append(asyncio.create_task(lift_shape()))
     tasks = [asyncio.create_task(load_clients.simulated_client(i, ns, logger, slow=s, disconnecting=d, late=l))
              for i, (s, d, l) in enumerate(roles(sc))]
+    source_cmd = [sys.executable, "-u", "caption_source.py", "--uri", uri, "--segments", str(segments),
+                  "--revision-delay", str(sc.revision_delay), "--segment-gap", str(sc.segment_gap), "--quiet"]
+    if sc.unique_text:
+        source_cmd += ["--transcript", str(unique_transcript(RESULTS / "hidden_transcript.txt", segments))]
     await asyncio.sleep(SOURCE_START_S)
     source = await asyncio.create_subprocess_exec(
-        sys.executable, "-u", "caption_source.py", "--uri", uri, "--segments", str(segments),
-        "--revision-delay", str(sc.revision_delay), "--segment-gap", str(sc.segment_gap), "--quiet",
-        cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT)
+        *source_cmd, cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT)
     if await source.wait() != 0:
         raise SystemExit("caption_source.py failed; see the .log")
     await asyncio.gather(*tasks)
@@ -326,13 +375,15 @@ def run_once(sc: Scenario, config: str, run_no: int, args) -> dict:
     server = None
     with log_path.open("w", encoding="utf-8") as log_fp:
         try:
+            server = subprocess.Popen([sys.executable, "-u", "solution_server.py", "--port", str(args.port)],
+                                      cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT, env=env)
+            wait_for_port(args.port, server)
+            # Shape only once the server listens: wait_for_port gives each connect 0.25 s,
+            # which a 600 ms RTT never meets.
             if sc.shape is not None:
                 reset_tc(args.iface)
                 for cmd in tc_commands(sc.shape, args.iface, args.port):
                     tc(cmd)
-            server = subprocess.Popen([sys.executable, "-u", "solution_server.py", "--port", str(args.port)],
-                                      cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT, env=env)
-            wait_for_port(args.port, server)
             end_epoch, segments, rss = asyncio.run(drive(sc, args, uri, csv_path, log_fp, server.pid))
         finally:
             if sc.shape is not None:
