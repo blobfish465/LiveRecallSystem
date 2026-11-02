@@ -91,13 +91,16 @@ covers the metric definitions. Results: `results/convergence_*` (gitignored); nu
 
 Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
 Firefox/geckodriver are missing, e.g. WSL2): in-place revision replacement and provisional/final styling,
-recall 15/30/60 s from local state only, drop → auto-reconnect → HISTORY recovery with no duplicates and
-resume from the latest final, late join in a second tab, server+source restart detection.
+recall 15/30/60 s from local state only with each line's age and the Hide button, drop → auto-reconnect →
+HISTORY recovery with no duplicates, resume from the latest final and the status line's "recovered N missed
+captions" message, late join in a second tab, server+source restart detection.
 Still check by hand before the demo (`python -m http.server 8000 --directory client`):
 
 - [ ] Two tabs show the same live stream; provisional rows grey/italic with …, finals dark with ✓; no duplicate lines
 - [ ] "What did I miss?" defaults to 30 s; 15/30/60 s switch the window; the panel updates as new finals arrive
-- [ ] "Simulate 5 s network drop" → status red → auto-reconnect → missed finals recovered (stats line: recovered N, duplicates 0)
+- [ ] "Simulate 5 s network drop" (Demo tools row) → status red → auto-reconnect → status says "recovered N missed captions (segments a–b), 0 duplicates"
+- [ ] Each recall line shows "N s ago"; a 60 s recall scrolls inside its panel; Hide closes it
+- [ ] No captions for 30 s (before the source starts or after it ends): status turns yellow "no captions for 30 s, re-checking the link", not red, then green again
 - [ ] New tab mid-lecture: the recall panel shows the recent context at once, then live rows follow
 - [ ] Browser on a different host: open `http://<server-ip>:8000/` (connects to `ws://<server-ip>:8765` by default) or pass `?ws=ws://<server-ip>:8765`
 - [ ] Restart server + source mid-lecture (stopping the server also ends the source, so numbering restarts at 1): the tab shows "stream restarted, rejoining" and continues with the new run (stats: restarts 1)

@@ -261,6 +261,12 @@ def test_recall_uses_local_state_only(driver, http_port, server, source):
     assert recall_items(driver) == [12]
     click(driver, "button[data-seconds='60']")
     assert recall_items(driver) == [10, 11, 12]
+    # Each line says how long ago it was said, on the lecture clock (newest = "0 s ago").
+    ages = driver.execute_script("return [...document.querySelectorAll('#recall .age')].map(a => a.textContent)")
+    assert ages == ["50 s ago", "22 s ago", "0 s ago"]
+    click(driver, "#recall-hide")                    # the panel can be closed again
+    assert recall_items(driver) == []
+    assert "nothing is requested from the server" in driver.find_element("id", "recall-title").text
     # Local only: still the one connection, and the server received exactly one CLIENT_HELLO.
     assert counters(driver)["connections"] == 1
     assert len(solution_server.CHANNELS) == 1
@@ -299,6 +305,10 @@ def test_reconnect_recovers_missed_finals_exactly_once(driver, http_port, server
     assert all(r["final"] for r in rows(driver))
     assert rows(driver)[3]["text"] == "segment 4 final"
     assert status_state(driver) == "connected"
+    # The status line says what the reconnect recovered, so the demo shows it on screen.
+    status = driver.find_element("id", "status").text
+    assert "resumed after segment 3" in status and "recovered 2 missed captions (segments 4–5)" in status
+    assert "0 duplicates" in status
 
 
 def test_late_join_gets_context_then_live_in_two_tabs(driver, http_port, server, source):
