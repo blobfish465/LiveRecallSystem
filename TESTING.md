@@ -122,7 +122,7 @@ HISTORY recovery with no duplicates, resume from the latest final and the status
 captions" message, late join in a second tab, server+source restart detection.
 Still check by hand before the demo (`python -m http.server 8000 --directory client`):
 
-- [ ] Two tabs show the same live stream; provisional rows grey/italic with …, finals dark with ✓; no duplicate lines
+- [ ] Two tabs show the same live stream; provisional rows grey/italic with a yellow "… provisional" badge, finals dark with a green "✓ final" badge; no duplicate lines
 - [ ] "What did I miss?" defaults to 30 s; 15/30/60 s switch the window; the panel updates as new finals arrive
 - [ ] "Simulate 5 s network drop" (Demo tools row) → status red → auto-reconnect → status says "recovered N missed captions (segments a–b), 0 duplicates"
 - [ ] Each recall line shows "N s ago"; a 60 s recall scrolls inside its panel; Hide closes it

@@ -287,9 +287,13 @@ function makeRow(segment) {
   row.dataset.segment = String(segment);
   const meta = document.createElement("span");
   meta.className = "meta";
+  // The state is spelled out in a badge, not only shown by colour, so it is
+  // readable at a glance (and for colour-blind students).
+  const badge = document.createElement("span");
+  badge.className = "badge";
   const text = document.createElement("span");
   text.className = "text";
-  row.append(meta, text);
+  row.append(meta, badge, text);
   return row;
 }
 
@@ -297,8 +301,9 @@ function updateRow(row, entry) {
   row.classList.toggle("final", entry.final);
   row.classList.toggle("provisional", !entry.final);
   row.dataset.revision = String(entry.revision);
-  row.firstChild.textContent = `#${entry.segment} r${entry.revision} ${entry.final ? "✓" : "…"}`;
-  row.lastChild.textContent = entry.text;  // textContent, never innerHTML: caption text is untrusted
+  row.querySelector(".meta").textContent = `#${entry.segment} r${entry.revision}`;
+  row.querySelector(".badge").textContent = entry.final ? "✓ final" : "… provisional";
+  row.querySelector(".text").textContent = entry.text;  // textContent, never innerHTML: caption text is untrusted
 }
 
 // "What did I miss?": the finals from the last `seconds` of lecture time,

@@ -162,7 +162,8 @@ def rows(driver):
     return driver.execute_script("""
         return [...document.querySelectorAll('#live .caption')].map(r => ({
             segment: Number(r.dataset.segment), revision: Number(r.dataset.revision),
-            final: r.classList.contains('final'), text: r.querySelector('.text').textContent}));
+            final: r.classList.contains('final'), text: r.querySelector('.text').textContent,
+            badge: r.querySelector('.badge').textContent}));
     """)
 
 
@@ -203,8 +204,9 @@ def test_revisions_replace_in_place(driver, http_port, server, source):
     wait_until(driver, has_row(2, 1))
 
     assert rows(driver) == [
-        {"segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements."},
-        {"segment": 2, "revision": 1, "final": False, "text": "Retransmission"},
+        {"segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements.",
+         "badge": "✓ final"},
+        {"segment": 2, "revision": 1, "final": False, "text": "Retransmission", "badge": "… provisional"},
     ]
 
     # A stale revision must not change what is shown; a marker message tells us it was processed.
@@ -212,7 +214,8 @@ def test_revisions_replace_in_place(driver, http_port, server, source):
     source.send(2, 2, "Retransmission timers", False)
     wait_until(driver, has_row(2, 2))
     assert rows(driver)[0] == {
-        "segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements."}
+        "segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements.",
+        "badge": "✓ final"}
     assert len(rows(driver)) == 2
     # The server rejected the stale message, so the page never saw it.
     assert counters(driver)["stale"] == 0
@@ -331,7 +334,8 @@ def test_late_join_gets_context_then_live_in_two_tabs(driver, http_port, server,
     wait_until(driver, has_row(3))
     source.send(4, 1, "segment 4 draft", False)      # ...then live updates reach both tabs
     wait_until(driver, has_row(4, 1))
-    assert rows(driver)[-1] == {"segment": 4, "revision": 1, "final": False, "text": "segment 4 draft"}
+    assert rows(driver)[-1] == {"segment": 4, "revision": 1, "final": False, "text": "segment 4 draft",
+                                "badge": "… provisional"}
     second_id = driver.execute_script("return sessionStorage.getItem('liverecall-client-id')")
     driver.close()
 

@@ -20,9 +20,14 @@
     #live { min-height: 8rem; max-height: 22rem; overflow-y: auto; border: 1px solid #bbb; border-radius: .4rem; padding: .5rem; }
     #live:empty::before { content: "Waiting for captions…"; color: #888; font-style: italic; }
     .caption { display: flex; gap: .7rem; padding: .3rem .5rem; border-left: 4px solid #ccc; margin: .15rem 0; }
-    .caption .meta { font-family: ui-monospace, monospace; font-size: .85rem; color: #888; min-width: 6rem; }
+    .caption .meta { font-family: ui-monospace, monospace; font-size: .85rem; color: #888; min-width: 4.5rem; }
+    /* Fixed width so the text does not jump sideways when a row turns final. */
+    .caption .badge { font-size: .75rem; font-style: normal; font-weight: 600; white-space: nowrap; align-self: flex-start;
+                      min-width: 6.5rem; text-align: center; padding: .1rem .4rem; border-radius: .7rem; }
     .caption.provisional { color: #666; font-style: italic; border-color: #e0a800; }
+    .caption.provisional .badge { background: #fff2c6; color: #7a5a00; }
     .caption.final { color: #111; border-color: #1a7f37; }
+    .caption.final .badge { background: #dcf5e3; color: #176b34; }
     .caption:last-child { background: #f6f8fa; }
 
     .controls button { padding: .55rem .75rem; margin: .2rem .2rem .2rem 0; border: 1px solid #999; border-radius: .4rem; background: #f3f3f3; cursor: pointer; }
@@ -44,7 +49,7 @@
   <p>Connection: <span id="status" data-state="disconnected">not connected</span></p>
 
   <h2>Live captions</h2>
-  <p class="hint">Grey italic rows marked … are provisional and may still change; dark rows marked ✓ are final. A newer revision replaces its row in place.</p>
+  <p class="hint">Rows marked “… provisional” (grey, italic) may still change; rows marked “✓ final” (dark) are complete. A newer revision replaces its row in place.</p>
   <div id="live" aria-live="polite"></div>
 
   <h2>What did I miss?</h2>
