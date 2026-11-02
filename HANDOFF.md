@@ -591,3 +591,88 @@ The last row is out of scope per the clarifications: at 10× the finals alone (~
 - **Memory:** still a fixed bound, ~1.2 MB worst case. In the quick gate, RSS is unchanged (~33 MB).
 - **Tests:** 3 new in `tests/test_state.py`: 60 s recoverable at 50 segments/s; reply trimmed to its byte budget keeping the newest contiguous items; exact budget boundary. `pytest` 113 passed / 1 skipped (Windows and WSL2). `check.py` GATE PASSED (WSL2): t1–t4 + late 100% finals, 0 dup/stale.
 - **Not re-run:** the reference-VM tables in Day 4 part 2. The change only matters when history exceeds 2000 items, which no public test or Day 4 run reaches (5-min run plateaus at 120), so those numbers still hold.
+
+## Update 2 Nov (2) — lihloway — hidden-variation matrix, two lag-policy fixes, Python 3.8
+
+All numbers in this section: **WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0%, 1 run each** (dev numbers, not the reference VM).
+
+### New tool: `hidden_sim.py` (13 scenarios for the three harder hidden components)
+
+See `TESTING.md` §4b. In short:
+- unmodified public clients, source and analyser;
+- `tc` on the test port only (rate, delay/jitter, loss, or a mix, optionally lifted mid-run);
+- before (plain FIFO) vs after (ours);
+- a **`due %`** column that excuses only finals sent in the last 3 s before the clients stop (the evaluator's "short bounded grace period"). On a shaped link the source's own handshake can be delayed 2–4 s, and its last finals then go out as the clients stop. That's an artifact of fixed-length runs, seen in both configs.
+
+### Results (finals **due** %, final code unless noted)
+
+| Scenario | Component | plain FIFO | ours (before the fixes) | **ours (final)** | Notes |
+|---|---|---:|---:|---:|---|
+| slow30: 30% slow @ 500 ms | adv1 | 85.8 | 100 | 100* | slow P95 10 s vs FIFO 29 s |
+| slow250: 10% @ 250 ms | adv1 | 100 | 100 | 100* | |
+| slow700: 10% @ 700 ms (just above the finals rate) | adv1 | 93.9 | **98.2** | **100** | fix 1 |
+| burst3x_slow: source 3×, readers @ 150 ms | adv1 | 95.9 | 100 | 100* | |
+| bw1m_250: 1 Mbit/s, 250 clients | adv2 | 100 | 100 | 100 | fresh finals 58% vs 0% |
+| bw2m_slow: 2 Mbit/s, 500 clients, 10% slow | adv2 | 95.4 | **99.78** | **99.96** | fix 2; see limitation |
+| bw2m_loss: 2 Mbit/s + 20 ms + 1% loss | adv2 | 100 | 100 | 100 | fresh finals 42% vs 0% |
+| bw2m_lifted: 2 Mbit/s for 30 s, then unlimited | adv2 | 100 | 100 | 100 | tail P95 36 ms: back to normal after the lift |
+| bw2m_reconnect: 2 Mbit/s, 20% drop + 20% late (60 s) | adv2 | 100 | 100 | 100 | ours less fresh here: P95 834 vs 267 ms |
+| mass_all: 100% reconnect at once | recon | 100 | 100 | 100* | recovery P95 8 ms |
+| mass_half_30s: 50% away 30 s | recon | 100 | 100 | 100* | |
+| outage_75s: 20% away 75 s | recon | 100 | 100 | 100* | resume gets all retained finals (90 s window) |
+| reconnect_loss: 20% drop on the T5 link | recon | 100 | 100 | 100* | |
+
+\* Not re-run after the fixes. Neither fix can act there: no client in those runs was lagging when it disconnected (fix 1), and none was in slow-link lag (fix 2). The quick gate (T3 included) passes on the final code.
+
+Duplicates and stale were 0 in every run, for both configs.
+
+### Fix 1: lag memory across reconnects (`LagMemory`, `liverecall/channel.py`)
+
+- **Problem (slow700):** a 700 ms reader is only just faster than the finals stream. Its pong stayed stuck behind its 16-message read-ahead for more than 10 s, so it was closed as hopeless. It reconnected, and `HISTORY` recovered everything correctly. But the new channel started in **full delivery**, refilled the read-ahead, and the last 15 finals were still unread when the run ended (98.0%).
+- **Fix:** a channel that closes while lagging records (cause, recovery wait) by client_id. It's bounded: 4096 entries, each kept 120 s, only int/str ids. A channel for the same client_id within that time **resumes lag mode at once**, counted as a relapse (doubled wait).
+- **Result:** slow700 → 100%. `[stats]` gains `lag_resumed_total`.
+
+### Fix 2: a slow reader on a slow link is reclassified (`_become_reader_lag`)
+
+- **Problem (bw2m_slow):** on a congested link every client's kernel RTT is high, so a slow *reader* there was classed as a slow *link*. Every ~10 s it was retried with the full stream, refilling its read-ahead, and finals were still stranded at the end.
+- **Fix:** congestion delays a pong by about one RTT, while a stalled reader holds it for its whole read-ahead (~8 s). So in slow-link lag, a pong pending more than `max(READER_PONG_S = 6 s, 4 × RTT)` reclassifies the client as a reader. It then gets the reader's ≥ 60 s wait. This only ever lengthens the wait.
+- **Result:** 99.78 → 99.96%. `[stats]` gains `reclassified_total`.
+
+**Remaining limitation:** about 13 of the ~50 slow readers are reclassified; the rest still lose their last 3–6 finals. That's 0.04% overall, above the 99% cap. A slow reader's finals arrive ~9 s late anyway (its library's read-ahead), so a retry in the last ~25 s strands a few. Lowering `READER_PONG_S` would catch more, at the risk of reclassifying merely congested clients.
+
+### No regression on Day 4's bandwidth test (A/B on the same machine)
+
+`bandwidth_test.py --apply --clients 500 --duration 60 --only after`, 2 runs each of old (`0323ec4`) and final code, interleaved:
+
+| | old 1 | old 2 | final 1 | final 2 |
+|---|---:|---:|---:|---:|
+| finals due % | 100 | 100 | 100 | 100 |
+| P50 / P95 ms | 602 / 1275 | 446 / 1359 | 461 / 1292 | 528 / 1356 |
+| fresh finals % | 46.4 | 55.2 | 56.8 | 50.0 |
+| coverage % | 56.8 | 56.3 | 56.4 | 57.0 |
+
+One earlier final-code run showed 97.4% *public* completeness. That was the late-source artifact: the source's first segment went out at 4.1 s, all 500 clients missed only the last 2 segments, and due was 100%.
+
+### Python 3.8 / websockets 13.1 (Ubuntu 20.04 grader insurance)
+
+- **Change:** `requirements.txt` is now `websockets>=13.1,<17`. On Python 3.10+, pip still installs 16.x, so nothing changes there. Code changes:
+  - removed `@dataclass(slots=True)`;
+  - the server imports `websockets.asyncio.server.serve` explicitly;
+  - `ClientChannel` creates its asyncio Event lazily (3.8 binds an Event to the loop at construction).
+- **Tests:** `pytest` passes on Python 3.8.20 + websockets 13.1 and on 3.12 + 16.1.1 (136 passed, 1 skipped). Under 3.8, `check.py` passes T1, T2, T4 and late join.
+- **Limitation:** under 3.8, **T3 is 95.5% (plain FIFO 95.1%)**. websockets 13.1's *client* reads ahead 32 messages + 64 KiB before it stops answering pings (16 messages on 16.x), so lag is detected too late and finals are stranded. The server can't change the client's buffer. So: if the grader's own clients run on websockets 13.x, our slow-reader advantage disappears, but nothing gets worse than a plain queue.
+
+### Numbers today (WSL2, quick gate, 1 run)
+
+```
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients):  P50 11.6 ms, P95 23.8 ms, P99 31.4 ms, completeness 100%
+- T3 (10% slow):     completeness 100%, coverage 95.1%, P95 793 ms (all clients)
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, recovery P95 5.6 ms
+```
+
+### Next person should start with
+
+Re-run the reference tables on the reference VM with the final code (`check.py --full --runs 3`, `bandwidth_test.py --apply ... --runs 3`, `hidden_sim.py --runs 3`). Two items are open for the report: the `bw2m_slow` residual, and the Python 3.8 T3 limitation.
+
+Claude suggestion I rejected: batching finals into a mid-stream `HISTORY` message for lagging clients. The teaching team ruled out unsolicited HISTORY on 2 Nov.
