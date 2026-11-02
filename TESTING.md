@@ -87,6 +87,30 @@ or when a converging client never got full delivery back (judged only when the f
 and `--only` refuses to merge into a summary made with other settings. `tests/test_convergence_tool.py`
 covers the metric definitions. Results: `results/convergence_*` (gitignored); numbers in `HANDOFF.md`.
 
+## 4b. Hidden-evaluation variations (`hidden_sim.py`; Linux, shaped scenarios need root for `tc`)
+
+```bash
+python hidden_sim.py --list                     # the 13 scenarios
+python hidden_sim.py                            # all, before (plain FIFO) + after (ours), ~30 min
+python hidden_sim.py --only adv2 --runs 3       # one component (adv1 | adv2 | recon) or scenario names
+```
+
+More settings for the three harder hidden components than the public tests give. Every scenario stays inside the teaching team's 2 Nov bounds: no reader slower than the finals stream, no link narrower than finals need.
+- **adv1 (slow readers):** 30% slow; readers at 250 ms and 700 ms; a 3× faster source with 150 ms readers.
+- **adv2 (bandwidth):** 1 Mbit/s with 250 clients; 2 Mbit/s combined with 10% slow readers or with 1% loss; the limit lifted after 30 s (catch-up); reconnects and 60 s late joins under the limit.
+- **recon:** 100% of clients reconnecting at once; 50% away for 30 s; 20% away for 75 s; reconnects on the T5 link.
+
+How it runs:
+- Same machinery as `convergence_test.py`: the public client code imported unmodified, roles assigned per client, the public source with its own `--revision-delay/--segment-gap`, and `analyse_results`.
+- Impairment comes from `tc` on the test port only (prio → netem → tbf), optionally only for part of the run, and is always reset.
+- Extra column `tail P95`: normal clients over the last 30 s, to show convergence after an impairment ends.
+- Extra column **`due %`**: completeness over the finals the source sent at least `GRACE_S` (3 s) before the clients stopped.
+  - This mirrors the evaluator's "short bounded grace period" (teaching team, 2 Nov).
+  - On a shaped link the source's own handshake can be delayed a few seconds, so its last finals go out just as the clients stop. That's a measurement artifact, not a server loss.
+  - Finals sent earlier and never delivered still count as lost.
+- An "after" run fails on due < 100% or any dup/stale/non-final HISTORY item. Connection errors are reported, not failed.
+- `tests/test_hidden_sim.py` covers the scenario bounds, roles, tc chain and metrics.
+
 ## 5. Manual checklist (browser, Day 3)
 
 Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
