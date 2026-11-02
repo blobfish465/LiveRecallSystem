@@ -5,6 +5,7 @@
 ## Team members
 
 - TODO: Name / student ID / responsibility (×4)
+- Tay Cole Lin / A0210841U / Architecture & protocol, revision/recovery semantics
 - Ong Qi An / A0281202W / browser client, constrained bandwidth, stress gate
 
 ## Ubuntu setup
