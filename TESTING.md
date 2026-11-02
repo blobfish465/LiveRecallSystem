@@ -90,20 +90,25 @@ covers the metric definitions. Results: `results/convergence_*` (gitignored); nu
 ## 4b. Hidden-evaluation variations (`hidden_sim.py`; Linux, shaped scenarios need root for `tc`)
 
 ```bash
-python hidden_sim.py --list                     # the 18 scenarios
-python hidden_sim.py                            # all, before (plain FIFO) + after (ours), ~30 min
-python hidden_sim.py --only adv2 --runs 3       # one component (adv1 | adv2 | recon | delay) or scenario names
+python hidden_sim.py --list                         # the 25 scenarios
+python hidden_sim.py                                # all, before (plain FIFO) + after (ours), ~1 h
+python hidden_sim.py --runs 3 --before-runs 1       # medians of 3 for ours, 1 baseline run, ~2 h
+python hidden_sim.py --only adv2 --runs 3           # one component (adv1 | adv2 | recon | delay | scale) or scenario names
 ```
 
 More settings for the three harder hidden components than the public tests give. Every scenario stays inside the teaching team's 2 Nov bounds: no reader slower than the finals stream, no link narrower than finals need.
-- **adv1 (slow readers):** 30% slow; readers at 250 ms and 700 ms; a 3× faster source with 150 ms readers.
-- **adv2 (bandwidth):** 1 Mbit/s with 250 clients; 2 Mbit/s combined with 10% slow readers or with 1% loss; the limit lifted after 30 s (catch-up); reconnects and 60 s late joins under the limit.
-- **recon:** 100% of clients reconnecting at once; 50% away for 30 s; 20% away for 75 s; reconnects on the T5 link.
+- **adv1 (slow readers):** 30% slow; readers at 250 ms and 700 ms; a 3× faster source with 150 ms readers; 8 revisions per segment; 3 s bursts at 8× every 10 s.
+- **adv2 (bandwidth):** 1 Mbit/s with 250 clients; 2 Mbit/s with 8 revisions per segment; 2 Mbit/s combined with 10% slow readers or with 1% loss; the limit lifted after 30 s (catch-up); reconnects and 60 s late joins under the limit.
+- **recon:** 100% of clients reconnecting at once; 50% away for 30 s; 20% away for 75 s; reconnects on the T5 link; flapping clients (20% drop every ~8 s) and flapping slow readers (lag memory).
 - **recon / adv2, large HISTORY:** non-repeating text with joins at 55 s asking 60 s, unshaped and on 2 Mbit/s (a big HISTORY reply on the shaped link: see the MSS cap in `HANDOFF.md`).
 - **delay:** 300 ± 100 ms each way, alone, with 3% loss, and with 10% slow readers.
+- **scale:** 1000 clients, and 1500 with 10% slow readers, spread over 4 / 6 load processes. One `load_clients` process tops out near 500.
 
 How it runs:
 - Same machinery as `convergence_test.py`: the public client code imported unmodified, roles assigned per client, the public source with its own `--revision-delay/--segment-gap`, and `analyse_results`.
+- **More revisions / bursts:** these scenarios use `custom_source.py`, a test-only source speaking the same protocol, with `--revisions N` and `--burst-every/--burst-len/--burst-factor`. Every other scenario uses the public `caption_source.py`.
+- **Flapping:** the tool wraps the harness's `websockets.connect` for the chosen clients, so their connection is aborted every ~N s. The public client then reconnects with its own resume state and logs as usual.
+- **Multi-process:** workers (`hidden_sim.py --worker ...`) share one wall-clock start, and their CSVs are merged before analysis.
 - Impairment comes from `tc` on the test port only (prio → netem → tbf), optionally only for part of the run, and is always reset.
 - Extra column `tail P95`: normal clients over the last 30 s, to show convergence after an impairment ends.
 - Extra column **`due %`**: completeness over the finals the source sent at least `GRACE_S` (3 s) before the clients stopped.
@@ -111,7 +116,7 @@ How it runs:
   - On a shaped link the source's own handshake can be delayed a few seconds, so its last finals go out just as the clients stop. That's a measurement artifact, not a server loss.
   - Finals sent earlier and never delivered still count as lost.
 - An "after" run fails on due < 100% or any dup/stale/non-final HISTORY item. Connection errors are reported, not failed.
-- `tests/test_hidden_sim.py` covers the scenario bounds, roles, tc chain and metrics.
+- `tests/test_hidden_sim.py` covers the scenario bounds, roles, flappers, source selection, the flap wrapper, CSV merging, the tc chain, the metrics and `custom_source.py`'s revisions/bursts.
 
 ## 5. Manual checklist (browser, Day 3)
 

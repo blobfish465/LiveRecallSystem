@@ -14,7 +14,8 @@ def test_scenario_names_unique_and_components_known():
 def test_every_scenario_stays_inside_the_teaching_team_bounds():
     """No reader slower than the finals stream; roles fit the client count."""
     for sc in hs.SCENARIOS:
-        finals_per_s = 1.0 / (2 * sc.revision_delay + sc.segment_gap)
+        # Outside bursts (bursts are temporary, which the bounds allow).
+        finals_per_s = 1.0 / ((sc.revisions - 1) * sc.revision_delay + sc.segment_gap)
         if sc.slow_pct:
             assert 1000.0 / sc.slow_ms > finals_per_s, sc.name
         hs.roles(sc)  # raises if roles exceed clients
@@ -113,3 +114,89 @@ def test_unique_transcript_never_repeats_and_is_deterministic(tmp_path):
     b = hs.unique_transcript(tmp_path / "b.txt", 200).read_text(encoding="utf-8").splitlines()
     assert a == b and len(a) == len(set(a)) == 200
     assert all(len(line.split()) >= 4 for line in a)  # caption_source makes 3 revisions from >= 4 words
+
+
+def test_segments_scale_with_revision_count():
+    eight = hs.Scenario("r8", "adv1", "", duration=60, revisions=8, revision_delay=0.1, segment_gap=0.35)
+    assert hs.segments_for(eight) == 54  # (60 - 3) / (7 * 0.1 + 0.35)
+
+
+def test_source_command_public_unless_more_revisions_or_bursts():
+    assert "caption_source.py" in hs.source_command(hs.Scenario("p", "adv1", ""), "ws://x", 10, None)
+    custom = hs.source_command(hs.Scenario("c", "adv1", "", revisions=8), "ws://x", 10, None)
+    assert "custom_source.py" in custom and custom[custom.index("--revisions") + 1] == "8"
+    bursty = hs.source_command(hs.Scenario("b", "adv1", "", burst_every=10, burst_len=3, burst_factor=8), "ws://x", 10, None)
+    assert "custom_source.py" in bursty and "--burst-factor" in bursty
+
+
+def test_flappers_come_from_the_right_pool():
+    slow = hs.Scenario("f", "recon", "", clients=20, slow_pct=10, flap_pct=10, flap_slow=True)
+    r = hs.roles(slow)
+    assert hs.flappers(slow) == {i for i, (s, _, _) in enumerate(r) if s}
+    plain = hs.Scenario("g", "recon", "", clients=20, slow_pct=10, disc_pct=10, flap_pct=20)
+    r = hs.roles(plain)
+    assert len(hs.flappers(plain)) == 4 and all(not any(r[i]) for i in hs.flappers(plain))
+    with pytest.raises(ValueError):
+        hs.flappers(hs.Scenario("h", "recon", "", clients=10, slow_pct=10, flap_pct=50, flap_slow=True))
+
+
+def test_flapping_connect_aborts_and_delays_reconnects(monkeypatch):
+    import asyncio
+
+    class Transport:
+        aborted = 0
+
+        def abort(self):
+            Transport.aborted += 1
+
+    class Inner:
+        async def __aenter__(self):
+            ws = type("WS", (), {})()
+            ws.transport = Transport()
+            return ws
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(hs.random, "uniform", lambda a, b: 1.0)
+
+    async def main():
+        plan = hs.FlapPlan(every=0.05, down=0.1)
+        loop = asyncio.get_running_loop()
+        async with hs.FlappingConnect(Inner(), plan):
+            await asyncio.sleep(0.08)
+        assert Transport.aborted == 1 and plan.connects == 1
+        t = loop.time()
+        async with hs.FlappingConnect(Inner(), plan):  # a reconnect waits `down` first
+            pass
+        assert loop.time() - t >= 0.09 and plan.connects == 2
+        assert Transport.aborted == 1  # left early: the timer was cancelled
+
+    asyncio.run(main())
+
+
+def test_merge_csvs_keeps_one_header_and_all_rows(tmp_path):
+    parts = []
+    for i in range(3):
+        p = tmp_path / f"p{i}.csv"
+        p.write_text("client_id,event_type\n" + f"{i},CONNECT\n{i},HISTORY\n", encoding="utf-8")
+        parts.append(p)
+    out = tmp_path / "all.csv"
+    hs.merge_csvs(parts, out)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "client_id,event_type" and len(lines) == 7
+    assert not any(p.exists() for p in parts)
+
+
+def test_custom_source_revisions_grow_to_the_sentence():
+    from caption_source import DEFAULT_SENTENCES
+    from custom_source import in_burst, revisions_of
+    for n in (1, 3, 8):
+        for sentence in DEFAULT_SENTENCES:
+            r = revisions_of(sentence, n)
+            assert len(r) == n and r[-1] == sentence
+            assert all(len(a) < len(b) and b.startswith(a) for a, b in zip(r, r[1:]))
+    with pytest.raises(ValueError):
+        revisions_of("ab", 3)
+    assert [in_burst(t, 10, 3) for t in (0, 2.9, 3.1, 10.5)] == [True, True, False, True]
+    assert not in_burst(1.0, 0, 3)
