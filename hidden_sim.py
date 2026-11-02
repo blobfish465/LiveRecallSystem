@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import csv
 import json
 import math
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from typing import Iterable
 from pathlib import Path
 
 import load_clients  # instructor harness, imported unmodified
@@ -113,6 +115,21 @@ class Scenario:
     # reply to almost nothing. unique_text feeds the source sentences that never repeat
     # (see unique_transcript), so HISTORY compresses like real lecture text.
     unique_text: bool = False
+    # Source shape beyond the public generator (custom_source.py): revisions per segment
+    # and bursts (for burst_len s out of every burst_every s, delays / burst_factor).
+    revisions: int = 3
+    burst_every: float = 0.0
+    burst_len: float = 0.0
+    burst_factor: float = 1.0
+    # Clients spread over this many processes (one load generator tops out near 500).
+    procs: int = 1
+    # Flapping: flap_pct% of clients drop abruptly every ~flap_every s and stay down
+    # flap_down s (plus the harness's own 0.4 s retry pause); taken from the slow
+    # readers when flap_slow, else from clients with no other role.
+    flap_pct: float = 0.0
+    flap_every: float = 10.0
+    flap_down: float = 0.0
+    flap_slow: bool = False
 
 
 SCENARIOS: list[Scenario] = [
@@ -121,11 +138,18 @@ SCENARIOS: list[Scenario] = [
     Scenario("slow250", "adv1", "10% slow at 250 ms/msg (~the full stream rate)", slow_ms=250, slow_pct=10),
     Scenario("slow700", "adv1", "10% slow at 700 ms/msg (1.43 msg/s, just above the finals rate)",
              slow_ms=700, slow_pct=10),
+    Scenario("revs8_slow", "adv1", "8 revisions per segment (7.6 msg/s, 0.95 finals/s), 10% slow at 500 ms",
+             revisions=8, revision_delay=0.1, segment_gap=0.35, slow_pct=10),
+    Scenario("bursty_slow", "adv1",
+             "3 s bursts at 8x every 10 s (~11 finals/s inside a burst), 10% slow at 400 ms",
+             burst_every=10, burst_len=3, burst_factor=8, slow_pct=10, slow_ms=400),
     Scenario("burst3x_slow", "adv1",
              "source 3x faster (12 msg/s, 4 finals/s), 10% readers at 150 ms (6.7 msg/s: finals yes, all no)",
              revision_delay=0.0667, segment_gap=0.1167, slow_pct=10, slow_ms=150),
     # ---- adv2: constrained bandwidth on the server port (bandwidth_test.py: 500 @ 2 Mbit/s) -
     Scenario("bw1m_250", "adv2", "1 Mbit/s, 250 clients", clients=250, shape=Shape(rate="1mbit")),
+    Scenario("bw2m_revs8", "adv2", "2 Mbit/s, 300 clients, 8 revisions per segment (provisional-heavy)",
+             clients=300, revisions=8, revision_delay=0.1, shape=Shape(rate="2mbit")),
     Scenario("bw2m_slow", "adv2", "2 Mbit/s, 500 clients, 10% slow readers at 500 ms",
              clients=500, slow_pct=10, shape=Shape(rate="2mbit")),
     Scenario("bw2m_loss", "adv2", "2 Mbit/s + 20 ms delay + 1% loss, 500 clients",
@@ -143,6 +167,10 @@ SCENARIOS: list[Scenario] = [
              disc_pct=20, disc_at=10, disc_s=75, duration=100),
     Scenario("reconnect_loss", "recon", "20% drop for 5 s on the public T5 link (120+-30 ms, 3% loss)",
              disc_pct=20, shape=Shape(delay_ms=120, jitter_ms=30, loss_pct=3)),
+    Scenario("flap", "recon", "20% of clients drop abruptly every ~8 s and stay down 1 s", flap_pct=20, flap_every=8,
+             flap_down=1),
+    Scenario("flap_slow", "recon", "the 10% slow readers also drop every ~10 s (exercises lag memory)",
+             slow_pct=10, flap_pct=10, flap_every=10, flap_slow=True),
     Scenario("late_long_text", "recon",
              "unique text; 20% drop at 70 s for 5 s, 20% join at 55 s asking 60 s (large HISTORY), 100 s",
              disc_pct=20, disc_at=70, late_pct=20, late_at=55, history_seconds=60, duration=100,
@@ -162,9 +190,14 @@ SCENARIOS: list[Scenario] = [
              shape=Shape(delay_ms=300, jitter_ms=100, loss_pct=3)),
     Scenario("delay300_slow", "delay", "300+-100 ms each way + 10% slow readers at 500 ms",
              slow_pct=10, shape=Shape(delay_ms=300, jitter_ms=100)),
+    # ---- scale: beyond the 500 clients one load_clients process can drive ---------------
+    Scenario("scale1000", "scale", "1000 clients over 4 load processes", clients=1000, duration=40, procs=4),
+    Scenario("scale1500_slow", "scale", "1500 clients over 6 load processes, 10% slow at 500 ms",
+             clients=1500, duration=40, procs=6, slow_pct=10),
 ]
 COMPONENTS = {"adv1": "slow-reader backpressure", "adv2": "constrained bandwidth",
-              "recon": "reconnect and catch-up", "delay": "delay/loss tail freshness"}
+              "recon": "reconnect and catch-up", "delay": "delay/loss tail freshness",
+              "scale": "more clients (correctness, normal coverage)"}
 
 _WORDS = ("packet segment window router switch frame header payload socket latency jitter "
           "bandwidth congestion retransmit acknowledgement handshake checksum sequence buffer queue "
@@ -202,8 +235,9 @@ def select(only: str | None) -> list[Scenario]:
 
 
 def segments_for(sc: Scenario) -> int:
-    """Segments that fit the run, as run_demo.default_source_segments but for any pace (3 revisions each)."""
-    per_segment = 2 * sc.revision_delay + sc.segment_gap
+    """Segments that fit the run, as run_demo.default_source_segments but for any pace and
+    revision count (bursts only make the source finish earlier)."""
+    per_segment = (sc.revisions - 1) * sc.revision_delay + sc.segment_gap
     active = max(3.0, sc.duration - SOURCE_START_S - TAIL_PAD_S)
     return max(4, math.floor(active / per_segment))
 
@@ -217,6 +251,33 @@ def roles(sc: Scenario) -> list[tuple[bool, bool, bool]]:
         raise ValueError(f"{sc.name}: roles exceed the client count")
     return [(i < n_slow, n_slow <= i < n_slow + n_disc, n_slow + n_disc <= i < n_slow + n_disc + n_late)
             for i in range(n)]
+
+
+def flappers(sc: Scenario) -> set[int]:
+    """Client indices that flap: from the slow readers (flap_slow) or from clients with no role."""
+    n = round(sc.clients * sc.flap_pct / 100)
+    if n == 0:
+        return set()
+    r = roles(sc)
+    pool = [i for i, (s, d, l) in enumerate(r) if (s if sc.flap_slow else not (s or d or l))]
+    if len(pool) < n:
+        raise ValueError(f"{sc.name}: not enough clients to flap")
+    return set(pool[:n])
+
+
+def source_command(sc: Scenario, uri: str, segments: int, transcript: Path | None) -> list[str]:
+    """The public caption_source.py unless the scenario needs more revisions or bursts."""
+    cmd = [sys.executable, "-u"]
+    if sc.revisions != 3 or sc.burst_every:
+        cmd += ["custom_source.py", "--revisions", str(sc.revisions), "--burst-every", str(sc.burst_every),
+                "--burst-len", str(sc.burst_len), "--burst-factor", str(sc.burst_factor)]
+    else:
+        cmd += ["caption_source.py"]
+    cmd += ["--uri", uri, "--segments", str(segments), "--revision-delay", str(sc.revision_delay),
+            "--segment-gap", str(sc.segment_gap), "--quiet"]
+    if transcript is not None:
+        cmd += ["--transcript", str(transcript)]
+    return cmd
 
 
 def tc_commands(shape: Shape, iface: str, port: int) -> list[list[str]]:
@@ -306,6 +367,56 @@ def reset_tc(iface: str) -> None:
     subprocess.run([*prefix, "tc", "qdisc", "del", "dev", iface, "root"], capture_output=True)
 
 
+@dataclass
+class FlapPlan:
+    every: float
+    down: float
+    connects: int = 0
+
+
+_FLAP: contextvars.ContextVar[FlapPlan | None] = contextvars.ContextVar("hidden_sim_flap", default=None)
+
+
+class FlappingConnect:
+    """Wraps one websockets.connect(): drops the connection abruptly (transport.abort)
+    ~every s later, and delays reconnects by `down`. The public client then sees a
+    connection error, pauses 0.4 s and reconnects with its own resume state, exactly as
+    after a real network drop; its code and its CSV stay the harness's own."""
+
+    def __init__(self, inner, plan: FlapPlan) -> None:
+        self.inner, self.plan, self.timer = inner, plan, None
+
+    async def __aenter__(self):
+        if self.plan.connects and self.plan.down:
+            await asyncio.sleep(self.plan.down)
+        self.plan.connects += 1
+        ws = await self.inner.__aenter__()
+        after = self.plan.every * random.uniform(0.8, 1.2)  # flappers don't all drop together
+        self.timer = asyncio.get_running_loop().call_later(after, ws.transport.abort)
+        return ws
+
+    async def __aexit__(self, *exc):
+        if self.timer is not None:
+            self.timer.cancel()
+        return await self.inner.__aexit__(*exc)
+
+
+def install_flapping() -> None:
+    """Route the harness's websockets.connect through FlappingConnect for tasks with a FlapPlan."""
+    ws_module = load_clients.websockets
+    if getattr(ws_module.connect, "_hidden_sim", False):
+        return
+    real = ws_module.connect
+
+    def connect(*args, **kwargs):
+        plan = _FLAP.get()
+        inner = real(*args, **kwargs)
+        return inner if plan is None else FlappingConnect(inner, plan)
+
+    connect._hidden_sim = True
+    ws_module.connect = connect
+
+
 def client_namespace(sc: Scenario, uri: str, csv_path: Path) -> argparse.Namespace:
     return argparse.Namespace(
         uri=uri, session="L1", clients=sc.clients, duration=float(sc.duration), output=str(csv_path),
@@ -315,13 +426,48 @@ def client_namespace(sc: Scenario, uri: str, csv_path: Path) -> argparse.Namespa
     )
 
 
-async def drive(sc: Scenario, args, uri: str, csv_path: Path, log_fp, server_pid: int) -> tuple[float, int, list[float]]:
-    segments = segments_for(sc)
+async def run_clients(sc: Scenario, uri: str, csv_path: Path, start_mono: float, indices: Iterable[int]) -> None:
+    """The public client for the given indices, with this scenario's roles; all processes
+    share start_mono (converted from one wall-clock start time) as the harness's global start."""
+    install_flapping()
     ns = client_namespace(sc, uri, csv_path)
+    ns._global_start = start_mono
     logger = load_clients.CSVLogger(str(csv_path))
     await logger.open()
-    ns._global_start = time.monotonic()
-    end_epoch = time.time() + sc.duration
+    r, flap = roles(sc), flappers(sc)
+
+    async def one(i: int) -> None:
+        if i in flap:
+            _FLAP.set(FlapPlan(sc.flap_every, sc.flap_down))  # this task's context only
+        s, d, l = r[i]
+        await load_clients.simulated_client(i, ns, logger, slow=s, disconnecting=d, late=l)
+
+    await asyncio.gather(*(one(i) for i in indices))
+    await logger.close()
+
+
+def merge_csvs(parts: list[Path], out: Path) -> None:
+    with out.open("w", newline="", encoding="utf-8") as fo:
+        writer = None
+        for part in parts:
+            with part.open(newline="", encoding="utf-8") as fi:
+                reader = csv.DictReader(fi)
+                if writer is None:
+                    writer = csv.DictWriter(fo, fieldnames=reader.fieldnames)
+                    writer.writeheader()
+                writer.writerows(reader)
+            part.unlink()
+
+
+WORKER_STARTUP_S = 2.5  # time for worker processes to import and open their CSVs
+
+
+async def drive(sc: Scenario, args, uri: str, csv_path: Path, log_fp, server_pid: int) -> tuple[float, int, list[float]]:
+    segments = segments_for(sc)
+    lead = WORKER_STARTUP_S if sc.procs > 1 else 0.0
+    start_mono = time.monotonic() + lead
+    start_epoch = time.time() + lead
+    end_epoch = start_epoch + sc.duration
     rss: list[float] = []
 
     async def sample_rss():
@@ -332,28 +478,42 @@ async def drive(sc: Scenario, args, uri: str, csv_path: Path, log_fp, server_pid
             await asyncio.sleep(0.5)
 
     async def lift_shape():
-        await asyncio.sleep(sc.shape_until)
+        await asyncio.sleep(lead + sc.shape_until)
         reset_tc(args.iface)
         print(f"  [{sc.name}] impairment lifted at {sc.shape_until:g} s", file=log_fp, flush=True)
 
     helpers = [asyncio.create_task(sample_rss())]
     if sc.shape is not None and sc.shape_until is not None:
         helpers.append(asyncio.create_task(lift_shape()))
-    tasks = [asyncio.create_task(load_clients.simulated_client(i, ns, logger, slow=s, disconnecting=d, late=l))
-             for i, (s, d, l) in enumerate(roles(sc))]
-    source_cmd = [sys.executable, "-u", "caption_source.py", "--uri", uri, "--segments", str(segments),
-                  "--revision-delay", str(sc.revision_delay), "--segment-gap", str(sc.segment_gap), "--quiet"]
-    if sc.unique_text:
-        source_cmd += ["--transcript", str(unique_transcript(RESULTS / "hidden_transcript.txt", segments))]
-    await asyncio.sleep(SOURCE_START_S)
+    parts: list[Path] = []
+    if sc.procs == 1:
+        clients = asyncio.ensure_future(run_clients(sc, uri, csv_path, start_mono, range(sc.clients)))
+    else:
+        workers = []
+        for part in range(sc.procs):
+            parts.append(csv_path.with_name(f"{csv_path.stem}.part{part}.csv"))
+            workers.append(await asyncio.create_subprocess_exec(
+                sys.executable, "-u", "hidden_sim.py", "--worker", sc.name, "--part", str(part),
+                "--parts", str(sc.procs), "--uri", uri, "--csv", str(parts[-1]), "--start-at", repr(start_epoch),
+                cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT))
+
+        async def wait_workers():
+            codes = [await w.wait() for w in workers]
+            if any(codes):
+                raise SystemExit(f"a load worker failed {codes}; see the .log")
+
+        clients = asyncio.ensure_future(wait_workers())
+    transcript = unique_transcript(RESULTS / "hidden_transcript.txt", segments) if sc.unique_text else None
+    await asyncio.sleep(lead + SOURCE_START_S)
     source = await asyncio.create_subprocess_exec(
-        *source_cmd, cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT)
+        *source_command(sc, uri, segments, transcript), cwd=HERE, stdout=log_fp, stderr=subprocess.STDOUT)
     if await source.wait() != 0:
-        raise SystemExit("caption_source.py failed; see the .log")
-    await asyncio.gather(*tasks)
+        raise SystemExit("the caption source failed; see the .log")
+    await clients
     for h in helpers:
         h.cancel()
-    await logger.close()
+    if parts:
+        merge_csvs(parts, csv_path)
     return end_epoch, segments, rss
 
 
@@ -397,7 +557,7 @@ def run_once(sc: Scenario, config: str, run_no: int, args) -> dict:
     if ("baseline mode: --no-coalesce" in text) != (config == "before"):
         raise SystemExit(f"the server ran in the wrong mode for '{config}'; see {stem}.log")
 
-    s = analyse_file(csv_path, expected_finals=segments, expected_updates=segments * 3,
+    s = analyse_file(csv_path, expected_finals=segments, expected_updates=segments * sc.revisions,
                      fresh_threshold_ms=args.fresh_threshold_ms)
     with csv_path.open(newline="", encoding="utf-8") as fp:
         rows = list(csv.DictReader(fp))
@@ -469,14 +629,29 @@ def print_table(results: dict[str, dict[str, list[dict]]]) -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--list", action="store_true", help="list the scenarios and exit")
-    p.add_argument("--only", help="scenario names and/or components (adv1, adv2, recon), comma-separated")
+    p.add_argument("--only", help="scenario names and/or components (adv1, adv2, recon, delay, scale), comma-separated")
     p.add_argument("--configs", default="before,after", help="before,after (default) or one of them")
     p.add_argument("--runs", type=int, default=1)
     p.add_argument("--port", type=int, default=8793)
     p.add_argument("--iface", default="lo")
     p.add_argument("--tag", default="")
     p.add_argument("--fresh-threshold-ms", type=float, default=500.0)
+    p.add_argument("--before-runs", type=int, help="runs of the plain-FIFO baseline (default: --runs)")
+    # Internal: one load-generator process for multi-process scenarios (started by drive()).
+    p.add_argument("--worker", help=argparse.SUPPRESS)
+    p.add_argument("--part", type=int, help=argparse.SUPPRESS)
+    p.add_argument("--parts", type=int, help=argparse.SUPPRESS)
+    p.add_argument("--uri", help=argparse.SUPPRESS)
+    p.add_argument("--csv", help=argparse.SUPPRESS)
+    p.add_argument("--start-at", type=float, help=argparse.SUPPRESS)
     args = p.parse_args()
+
+    if args.worker:
+        sc = next(s for s in SCENARIOS if s.name == args.worker)
+        start_mono = time.monotonic() + (args.start_at - time.time())
+        asyncio.run(run_clients(sc, args.uri, Path(args.csv), start_mono,
+                                range(args.part, sc.clients, args.parts)))
+        return 0
 
     if args.list:
         for sc in SCENARIOS:
@@ -502,6 +677,8 @@ def main() -> int:
     for sc in scenarios:
         for run_no in range(1, args.runs + 1):
             for config in configs:  # interleaved: both configs see the same machine conditions
+                if config == "before" and args.before_runs is not None and run_no > args.before_runs:
+                    continue
                 s = run_once(sc, config, run_no, args)
                 results.setdefault(sc.name, {}).setdefault(config, []).append(s)
                 failed |= config == "after" and bool(s["problems"])
