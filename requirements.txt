@@ -1,4 +1,8 @@
 # Mandatory deterministic path only.
-# Pinned to 16.x: lag detection relies on this version's client read-ahead
-# (stops reading, pings included, at 16 queued frames); measured on 16.1.1.
-websockets>=16,<17
+# 13.1 to 16.x, the same range as the instructor's starter (>=13,<17), so the
+# server installs on Python 3.8+ (Ubuntu 20.04 and later): pip picks 13.1 on
+# Python 3.8/3.9 and 16.x on 3.10+. The server imports the asyncio
+# implementation explicitly, which 13.1 already ships. The lag policy was
+# designed and measured on 16.1.1 (its client reads ahead 16 frames); the
+# 13.1 run under Python 3.8 is recorded in HANDOFF.md.
+websockets>=13.1,<17

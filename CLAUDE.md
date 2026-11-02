@@ -47,7 +47,11 @@ python check.py              # ~3 min; must print "GATE PASSED" and timer drift 
 - Server must ignore unknown fields and `SOURCE_DONE`, and survive malformed JSON / clients dropping mid-send.
 - Do not assume exactly 3 revisions per segment (public source does; hidden one may not).
 - Boundedness is graded as correctness: no unbounded history, per-client queue, or memory growth.
-- **Python 3.10 compatible** (Ubuntu 22.04's default; the grader may use it). Don't use 3.11+ features: `asyncio.timeout`, `asyncio.TaskGroup`, `ExceptionGroup`/`except*`, `tomllib`, `typing.Self`. Use `asyncio.wait_for` / `gather` instead.
+- **The server path (`solution_server.py`, `liverecall/`) must run on Python 3.8 + websockets 13.1** (Ubuntu 20.04; the instructor's starter allows `websockets>=13`). `requirements.txt` says `websockets>=13.1,<17`: pip picks 13.1 on 3.8/3.9 and 16.x on 3.10+.
+  - Don't use: `@dataclass(slots=True)`, `X | Y` in runtime expressions (annotations are fine with `from __future__ import annotations`), `match`, `dict | dict`, `str.removeprefix`, `asyncio.to_thread`/`timeout`/`TaskGroup`.
+  - Don't create asyncio objects (Event, Lock, Queue) outside a running loop (3.8 binds them at construction).
+  - Import the server as `from websockets.asyncio.server import serve` (on 13.1 `websockets.serve` is the legacy one).
+  - Check before pushing: `uv python install 3.8`, create `venv38` from that interpreter, `pip install -r requirements.txt "pytest<8.4"`, run `venv38/Scripts/python -m pytest -q` (or `venv38/bin/python`). Tests and tools may use 3.10+, but currently all pass on 3.8 too.
 - Shell scripts must stay LF (`.gitattributes` enforces it). If copying from an old Windows checkout, run `sed -i 's/\r$//' network_profiles/*.sh`.
 
 ## Protocol (field names are fixed)
@@ -84,6 +88,10 @@ Known residual risk: Day 4's end-of-run tail. A slow reader that retries full de
 - **Snapshot history + register client for live updates with no `await` in between** (atomic in asyncio) — otherwise finals get duplicated or lost across HISTORY/live.
 - **Server history**: deque of finals bounded by time (90 s) **and** a max count (6000, enough for 60 s at high caption rates). Each HISTORY reply is capped at 768 KiB (newest items kept) so it never exceeds websockets clients' 1 MiB message limit.
 - **Overload policy**: under real lag only, coalesce provisional revisions per segment (keep newest); **never drop finals**; send the newest revision with its own `source_ts`. When the client catches up, return to full-update delivery (Normal Update Coverage is graded).
+- **Lag memory + reader reclassification (2 Nov, `liverecall/channel.py`):**
+  - A lagging client that disconnects resumes lag mode on reconnect (bounded `LagMemory` by client_id, kept 120 s) instead of being flooded with the full stream again.
+  - In slow-link lag, a pong pending > max(6 s, 4 × RTT) reclassifies the client as a slow reader (longer recovery wait).
+  - Found with `hidden_sim.py` (slow700, bw2m_slow); see `HANDOFF.md` "Update 2 Nov (2)".
 - **Confirmed on Day 1:** for slow readers the backlog sits in the `websockets` receive queue and TCP buffers, *not* in our queue (`max_pending` stays 0 during T3). A bounded app queue alone can't fix slow-client freshness; we need a lag signal plus a cap on in-flight messages. See "Key finding" in `HANDOFF.md`.
 - Keep state/channel logic in plain classes that don't touch real sockets, so they are unit-testable.
 

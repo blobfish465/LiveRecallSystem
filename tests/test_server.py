@@ -8,6 +8,7 @@ import pytest
 import websockets
 
 import solution_server
+from liverecall.channel import LagMemory
 from liverecall.state import CaptionState
 
 
@@ -15,7 +16,8 @@ from liverecall.state import CaptionState
 def fresh_server_state(monkeypatch):
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
     monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
-                        {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0})
+                        {key: 0 for key in solution_server.CLOSED_TOTALS})
+    monkeypatch.setattr(solution_server, "LAG_MEMORY", LagMemory())
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()

@@ -25,6 +25,7 @@ import websockets
 from websockets.sync.client import connect as ws_connect
 
 import solution_server
+from liverecall.channel import LagMemory
 from liverecall.state import CaptionState
 
 selenium = pytest.importorskip("selenium")
@@ -112,7 +113,8 @@ def fresh_server_state(monkeypatch):
     """Each test starts from an empty server, like tests/test_server.py."""
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
     monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
-                        {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0})
+                        {key: 0 for key in solution_server.CLOSED_TOTALS})
+    monkeypatch.setattr(solution_server, "LAG_MEMORY", LagMemory())
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()

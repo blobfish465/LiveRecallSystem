@@ -5,7 +5,7 @@ import time
 import pytest
 
 import liverecall.channel as channel_mod
-from liverecall.channel import ClientChannel
+from liverecall.channel import ClientChannel, LagMemory
 from liverecall.state import make_caption
 
 
@@ -728,6 +728,140 @@ def test_link_relapse_enters_lag_at_first_late_pong():
         ch.link_strikes = 2  # would need two strikes for a first entry
         await enter_lag(ch, ping, 3)
         assert ch.link_lag and ch.lag_entries == 2
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+# ------------------------------------------------- lag memory (2 Nov, hidden_sim slow700)
+def test_lag_memory_roundtrip_forgets_after_recall():
+    mem = LagMemory()
+    mem.remember(7, True, 20.0)
+    assert len(mem) == 1
+    assert mem.recall(7) == (True, 20.0)
+    assert mem.recall(7) is None and len(mem) == 0
+
+
+def test_lag_memory_expires_and_is_bounded():
+    now = [1000.0]
+    mem = LagMemory(max_entries=3, keep_s=120, clock=lambda: now[0])
+    for cid in range(5):
+        mem.remember(cid, False, 60.0)
+    assert len(mem) == 3 and mem.recall(0) is None and mem.recall(1) is None  # oldest dropped
+    now[0] += 121
+    assert mem.recall(4) is None  # expired
+
+
+@pytest.mark.parametrize("cid", [None, True, {"x": 1}, [1], 1.5])
+def test_lag_memory_ignores_unusable_ids(cid):
+    mem = LagMemory()
+    mem.remember(cid, False, 60.0)
+    assert len(mem) == 0 and mem.recall(cid) is None
+
+
+def reader_channel(rec, ping, mem, cid=7):
+    return ClientChannel(rec, client_id=cid, ping=ping, lag_s=0.05, ping_every_s=0, probe_s=0.05,
+                         rtt=lambda: 0.0001, recover_s=60, jitter=0, lag_memory=mem)
+
+
+def test_lagging_client_resumes_lag_mode_after_reconnect():
+    """A slow reader closed while lagging must not get the full stream on its new connection."""
+    async def main():
+        mem = LagMemory()
+        rec, ping = Recorder(), FakePing()
+        ch = reader_channel(rec, ping, mem)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        ch.close()
+        ch.close()  # idempotent: remembered once
+        await task
+        assert len(mem) == 1
+
+        rec2 = Recorder()
+        ch2 = reader_channel(rec2, FakePing(auto=True), mem)
+        assert ch2.lagging and ch2.coalescing and ch2.lag_resumed and not ch2.link_lag
+        assert ch2._recover_wait == 120  # a relapse: 60 doubled (cap RECOVER_MAX_S)
+        assert len(mem) == 0
+        ch2.offer_control('{"type":"HISTORY","items":[]}')
+        for c in [cap(5, 1), cap(5, 2), cap(6, 1, True)]:
+            ch2.offer(c)
+        task2 = asyncio.create_task(ch2.run())
+        await settle()
+        assert rec2.sent[0]["type"] == "HISTORY"
+        assert keys(rec2.sent) == [(6, 1)]  # finals only; (5, 2) held and coalesced
+        ch2.close()
+        await task2
+
+    asyncio.run(main())
+
+
+def test_client_that_was_not_lagging_starts_normally():
+    async def main():
+        mem = LagMemory()
+        rec, ping = Recorder(), FakePing(auto=True)
+        ch = reader_channel(rec, ping, mem)
+        task = asyncio.create_task(ch.run())
+        ch.offer(cap(1, 1))
+        await settle()
+        ch.close()
+        await task
+        assert len(mem) == 0
+        ch2 = reader_channel(Recorder(), FakePing(auto=True), mem)
+        assert not ch2.lagging and not ch2.lag_resumed
+
+    asyncio.run(main())
+
+
+def test_lag_memory_is_per_client():
+    async def main():
+        mem = LagMemory()
+        rec, ping = Recorder(), FakePing()
+        ch = reader_channel(rec, ping, mem, cid=7)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        ch.close()
+        await task
+        assert not reader_channel(Recorder(), FakePing(auto=True), mem, cid=8).lagging
+        assert reader_channel(Recorder(), FakePing(auto=True), mem, cid=7).lagging
+
+    asyncio.run(main())
+
+
+# --------------------------------------- reader on a slow link (2 Nov, hidden_sim bw2m_slow)
+def test_stuck_pong_in_link_lag_reclassifies_as_reader(monkeypatch):
+    """Congestion delays a pong ~1 RTT; a pong stuck far longer means the reader stopped."""
+    monkeypatch.setattr(channel_mod, "READER_PONG_S", 0.2)
+    async def main():
+        rec, ping, ch = lag_channel(0.06, recover_s=60, link_recover_s=10, jitter=0)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        assert ch.link_lag and ch._recover_wait == 10
+        await asyncio.sleep(0.35)  # pong still pending > max(0.2, 4 x 0.06)
+        ch.offer(cap(3, 1, True))
+        await settle()
+        assert not ch.link_lag and ch.reclassified == 1
+        assert ch._recover_wait == 60  # the reader's wait, never shorter than before
+        assert not ch.closed  # still not hopeless on a slow link
+        ch.close()
+        await task
+
+    asyncio.run(main())
+
+
+def test_prompt_pongs_in_link_lag_stay_link(monkeypatch):
+    monkeypatch.setattr(channel_mod, "READER_PONG_S", 0.2)
+    async def main():
+        rec, ping, ch = lag_channel(0.06, recover_s=60, link_recover_s=10, jitter=0)
+        task = asyncio.create_task(ch.run())
+        await enter_lag(ch, ping, 1)
+        ping.auto = True  # later probes are answered: a congested but working link
+        resolve_all(ping)  # the pong arrives about one RTT late: congestion
+        await settle()
+        await asyncio.sleep(0.35)
+        ch.offer(cap(3, 1, True))
+        await settle()
+        assert ch.link_lag and ch.reclassified == 0 and ch._recover_wait == 10
         ch.close()
         await task
 

@@ -48,6 +48,21 @@ wait is `recover_s` (60 s) for a slow reader, because a failed try refills its
 Each wait gets jitter so clients that lagged together do not all retry
 together: +-50% for a link, +0..50% for a reader (60 s is a floor, see RECOVER_S). Entering lag within REARM_S of leaving doubles the next wait (up to
 RECOVER_MAX_S); a longer calm period resets it.
+
+Reclassification (2 Nov): a reader can be slow *on* a slow link. The kernel RTT is
+then high, so lag entry says "link", and the 10 s link waits retried full delivery
+over and over, each time refilling the reader's read-ahead; finals were still
+buffered when the run ended (hidden_sim bw2m_slow: 99.66%). Congestion delays a
+pong by about one RTT, a stalled reader by the whole read-ahead (~8 s at 2 msg/s).
+So in link lag, a pong pending longer than max(READER_PONG_S, READER_RTT_FACTOR x
+RTT) turns the lag into reader lag. This only ever lengthens the wait.
+
+Lag memory (2 Nov): a lagging client that disconnects (hopeless close, network
+drop) used to come back on a fresh channel in full delivery, refilling its
+read-ahead, and lost the finals still buffered at the end (hidden_sim slow700: a
+700 ms reader, 98.0%). LagMemory keeps the lag state of recently closed lagging
+channels by client_id (bounded: LAG_MEMORY_MAX entries, each REARM_S), and a
+channel for the same client_id resumes lag mode at once, as a relapse.
 """
 
 from __future__ import annotations
@@ -55,7 +70,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -114,12 +129,63 @@ RECOVER_MAX_S = 120.0
 # Re-entering lag within this long of leaving it counts as a relapse (doubles the
 # wait); a longer calm period resets the wait to the base.
 REARM_S = 120.0
+# In slow-link lag, a pong pending longer than max(READER_PONG_S, READER_RTT_FACTOR x
+# kernel RTT) means the client app stopped reading: reclassify as a slow reader.
+# Congestion holds a pong ~1 RTT (0.5-1 s on the 2 Mbit/s 500-client test); a stalled
+# 500 ms reader holds it for its 16-message read-ahead, ~8 s.
+READER_PONG_S = 6.0
+READER_RTT_FACTOR = 4.0
+# Lag memory bound: entries for closed lagging channels, each kept REARM_S.
+LAG_MEMORY_MAX = 4096
 
 
-@dataclass(slots=True)
+@dataclass  # no slots=True: that needs Python 3.10 and the server must run on 3.8
 class Outgoing:
     wire: str
     caption: Caption | None  # None for control messages such as HISTORY
+
+
+class LagMemory:
+    """Lag state of recently closed lagging channels, by client_id (see module doc).
+
+    Bounded by count (oldest dropped first) and age (keep_s). Only plain int/str
+    ids are remembered; anything else (missing, objects) is ignored.
+    """
+
+    def __init__(self, max_entries: int = LAG_MEMORY_MAX, keep_s: float = REARM_S,
+                 clock: Callable[[], float] = time.time) -> None:
+        self.max_entries = max_entries
+        self.keep_s = keep_s
+        self._clock = clock
+        self._entries: OrderedDict[object, tuple[float, bool, float]] = OrderedDict()
+
+    @staticmethod
+    def _key(client_id: object) -> object | None:
+        if isinstance(client_id, bool) or not isinstance(client_id, (int, str)):
+            return None
+        return client_id
+
+    def remember(self, client_id: object, link_lag: bool, recover_s: float) -> None:
+        key = self._key(client_id)
+        if key is None:
+            return
+        self._entries.pop(key, None)
+        self._entries[key] = (self._clock(), link_lag, recover_s)
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+    def recall(self, client_id: object) -> tuple[bool, float] | None:
+        """(link_lag, recover_s) if this client closed while lagging within keep_s; forgets it."""
+        key = self._key(client_id)
+        if key is None:
+            return None
+        entry = self._entries.pop(key, None)
+        if entry is None or self._clock() - entry[0] > self.keep_s:
+            return None
+        return entry[1], entry[2]
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
 
 class ClientChannel:
@@ -141,6 +207,7 @@ class ClientChannel:
         link_strikes: int = LINK_STRIKES,
         link_confirm_s: float = LINK_CONFIRM_S,
         clock: Callable[[], float] = time.time,  # same clock as Caption.recv_ts
+        lag_memory: LagMemory | None = None,
     ) -> None:
         self._send = send
         self.client_id = client_id
@@ -176,13 +243,35 @@ class ClientChannel:
         self._pong: asyncio.Future[object] | None = None
         self._ping_at = -1e9  # loop time of the latest ping (lag timing)
         self._ping_wall = 0.0  # self._clock() of the latest ping (hopeless timing)
-        self._wakeup = asyncio.Event()
-        self._closed_evt = asyncio.Event()
+        # Created on first wait, inside the running loop: on Python 3.8/3.9 an
+        # asyncio.Event binds to the loop current at construction, which breaks a
+        # channel built outside a loop. _wake() before then is a no-op, which is
+        # safe: the sender re-checks the queue before every wait.
+        self._wakeup_evt: asyncio.Event | None = None
         self.closed = False
         # Counters for logs, tests, and the report.
         self.sent = 0
         self.coalesced = 0
         self.overflowed = False
+        self.lag_resumed = False  # started in lag mode from lag_memory
+        self.reclassified = 0  # slow-link lags turned into slow-reader lags
+        self._lag_memory = lag_memory
+        remembered = lag_memory.recall(client_id) if lag_memory is not None else None
+        if remembered is not None:
+            self._resume_lag(*remembered)
+
+    def _resume_lag(self, link_lag: bool, recover_s: float) -> None:
+        """Start in lag mode: this client closed while lagging moments ago. Counts as
+        a relapse (doubled wait), because its last full-delivery attempt failed."""
+        self.link_lag = link_lag
+        base = self._link_recover_s if link_lag else self._base_recover_s
+        self._recover_s = max(base, min(recover_s * 2, RECOVER_MAX_S))
+        low = 1 - self.jitter if link_lag else 1.0
+        self._recover_wait = self._recover_s * random.uniform(low, 1 + self.jitter)
+        self.lagging = True
+        self.coalescing = True
+        self.lag_entries += 1
+        self.lag_resumed = True
 
     # ----------------------------------------------------------- producers
     def offer_control(self, wire: str) -> None:
@@ -190,7 +279,7 @@ class ClientChannel:
         if self.closed:
             return
         self._queue.append(Outgoing(wire, None))
-        self._wakeup.set()
+        self._wake()
 
     def offer(self, caption: Caption) -> None:
         """Queue a caption update. Must not await (called from the source loop)."""
@@ -202,7 +291,7 @@ class ClientChannel:
                 entry.wire = caption.wire
                 entry.caption = caption
                 self.coalesced += 1
-                self._wakeup.set()
+                self._wake()
                 self._check_hopeless()
                 return
         entry = Outgoing(caption.wire, caption)
@@ -213,7 +302,7 @@ class ClientChannel:
             if len(self._queue) > self.max_pending:
                 self._overflow()
                 return
-        self._wakeup.set()
+        self._wake()
         self._check_hopeless()
 
     def _check_hopeless(self) -> None:
@@ -351,7 +440,7 @@ class ClientChannel:
                 self._strikes = 0  # on time: an earlier late pong was a one-off
                 if self._calm_since is None:
                     self._calm_since = pong_at
-            self._wakeup.set()
+            self._wake()
 
         pong.add_done_callback(done)
 
@@ -384,6 +473,8 @@ class ClientChannel:
             return
         if self.lagging:
             self._calm_since = None  # an overdue pong is not calm
+            if self.link_lag and now - self._ping_at > self._reader_pong_s():
+                self._become_reader_lag()
             return
         link = self._slow_link()
         if link and not self._link_confirmed(now):
@@ -407,6 +498,24 @@ class ClientChannel:
         self.coalescing = True
         self.lag_entries += 1
         self._compact()
+
+    def _reader_pong_s(self) -> float:
+        rtt = None
+        if self._rtt is not None:
+            try:
+                rtt = self._rtt()
+            except OSError:
+                rtt = None
+        return max(READER_PONG_S, READER_RTT_FACTOR * rtt) if rtt else READER_PONG_S
+
+    def _become_reader_lag(self) -> None:
+        """Link lag whose pong is stuck far longer than the link explains: the reader
+        is slow too. Take the reader's (longer) wait; never shorten the current one."""
+        self.link_lag = False
+        self.reclassified += 1
+        self._recover_s = max(self._recover_s, self._base_recover_s)
+        self._recover_wait = max(self._recover_wait,
+                                 self._recover_s * random.uniform(1.0, 1 + self.jitter))
 
     def _link_confirmed(self, now: float) -> bool:
         if self.link_lag and self._left_lag_at is not None and now - self._left_lag_at < REARM_S:
@@ -444,11 +553,25 @@ class ClientChannel:
         return None
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
         self._queue.clear()
         self._latest.clear()
-        self._wakeup.set()
-        self._closed_evt.set()
+        if self._lag_memory is not None and self.lagging:
+            self._lag_memory.remember(self.client_id, self.link_lag, self._recover_s)
+        self._wake()
+
+    def _wake(self) -> None:
+        if self._wakeup_evt is not None:
+            self._wakeup_evt.set()
+
+    @property
+    def _wakeup(self) -> asyncio.Event:
+        """The sender's wake-up event; only waited on from run(), inside the loop."""
+        if self._wakeup_evt is None:
+            self._wakeup_evt = asyncio.Event()
+        return self._wakeup_evt
 
     @property
     def pending(self) -> int:
