@@ -767,3 +767,57 @@ Report items:
 - the HISTORY stall and the MSS cap (a good "experiment that surprised us");
 - the high-latency coverage trade-off;
 - the Python 3.8 note.
+
+## Update 3 Nov — lihloway — full hidden_sim matrix (25 scenarios, median of 3) + new tooling
+
+**Environment:** WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0%, final code (`ad97b53`). Dev numbers, not the reference VM.
+
+**Command:** `python hidden_sim.py --runs 3 --before-runs 1` (our server ×3, plain FIFO ×1; ~2 h). Raw output: `results/hidden_final_*`, summary `results/hidden_final_summary.json` (gitignored).
+
+**New tooling (this update):**
+- `custom_source.py`: a test-only source, same protocol, with N revisions per segment and periodic bursts.
+- Flapping clients: the harness's `websockets.connect` is wrapped for chosen clients and aborted every ~N s. The unmodified public client reconnects with its own resume state.
+- More than 500 clients: load split over worker processes with one shared start time; CSVs merged.
+- `--before-runs`. Tests in `tests/test_hidden_sim.py` (18).
+
+### Result: our server reaches 100% of due finals in all 3 runs of 24 of 25 scenarios. The exception is `bw2m_slow` (99.96–99.99%).
+
+The plain FIFO falls short in 7 scenarios.
+
+| Scenario | Component | FIFO due % | **ours due %** (3/3 runs) | Ours vs FIFO, other metrics (median) |
+|---|---|---:|---:|---|
+| slow30 | adv1 | 86.7 | **100** | slow P95 9.6 s vs 29.7 s |
+| slow250 | adv1 | 100 | **100** | same |
+| slow700 | adv1 | 93.9 | **100** | 10 hopeless closes, recovered via HISTORY + lag memory |
+| revs8_slow (8 revisions/segment) | adv1 | 92.8 | **100** | slow P95 10.6 s vs 43.8 s |
+| bursty_slow (8× bursts) | adv1 | 100 | **100** | both close the slow readers during bursts |
+| burst3x_slow | adv1 | 96.4 | **100** | P95 5 ms vs 4.2 s |
+| bw1m_250 | adv2 | 100 | **100** | fresh finals 43% vs 19%; coverage 73% vs 96% |
+| bw2m_revs8 | adv2 | 100 | **100** | **FIFO fresher** (fresh finals 93% vs 54%, P95 486 vs 658 ms) |
+| bw2m_slow | adv2 | 95.8 | **99.97** (99.96–99.99) | known residual; above the 99% cap |
+| bw2m_loss | adv2 | 100 | **100** | fresh finals 55% vs 18%; coverage 69% vs 99% |
+| bw2m_lifted | adv2 | 100 | **100** | tail P95 35 ms (converged after the lift) |
+| bw2m_reconnect | adv2 | 100 | **100** | **FIFO fresher** (P95 198 vs 470 ms) |
+| bw2m_late_long (large HISTORY) | adv2 | 100 | **100** | FIFO fresher (P95 305 vs 502 ms) |
+| mass_all, mass_half_30s, outage_75s | recon | 100 | **100** | identical; recovery P95 14–17 ms |
+| reconnect_loss | recon | 100 | **100** | P95 1020 vs 1046 ms |
+| flap (20% drop every ~8 s) | recon | 100 | **100** | identical |
+| flap_slow (slow readers flapping) | recon | 100 | **100** | P95 6 ms vs 489 ms; slow P95 7.5 s vs 9.2 s |
+| late_long_text | recon | 100 | **100** | identical |
+| delay300 / delay300_loss | delay | 100 | **100** | coverage ~40% vs ~99% (known false link-lag) |
+| delay300_slow | delay | 95.7 | **100** | slow P95 10.7 s vs 29.9 s |
+| scale1000 | scale | 100 | **100** | P95 53 vs 36 ms (ping overhead) |
+| scale1500_slow | scale | 95.8 | **100** | slow P95 9.8 s vs 20.5 s |
+
+Duplicates and stale were 0 in all 100 runs.
+
+### What this says (for the report)
+
+- **Completeness is where the design pays off.** Ours is 100% (99.97% worst case) wherever readers can keep up with finals; a plain queue loses 4–14% of finals for slow readers. This is the correctness gate (< 99% caps hidden D).
+- **Weak spot: freshness when the link is *nearly* sufficient.** At 300 clients on 2 Mbit/s (`bw2m_revs8`, `bw2m_reconnect`, `bw2m_late_long`) the plain stream fits the link. Our ~1 ping/s per client plus pongs pushes it into congestion, and the lag policy then goes finals-only, so the FIFO is fresher there. (Day 3 found the same before the ping budget; the budget reduced the effect but didn't remove it.) At 500 clients, where the stream genuinely doesn't fit, ours is clearly better.
+- **Coverage is the price everywhere a link looks slow:** ~70% on 2 Mbit/s, ~40% on high-latency jittery links. Coverage is graded under "normal" conditions only, so this is a deliberate trade, not a correctness issue.
+- **Possible future work:** ping only clients that show signs of lag (e.g. kernel `tcpi_notsent_bytes` > 0 or a growing RTT) instead of every client every second. That would remove most of the overhead where the stream fits.
+
+### Next person should start with
+
+The report. These are dev numbers. If any go in the report, label them "WSL2, median of 3"; otherwise re-run `hidden_sim.py --runs 3` on the reference VM.
