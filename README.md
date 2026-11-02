@@ -54,7 +54,7 @@ TODO (Day 3/4).
 ## Design notes
 
 - **Revision state** (`liverecall/state.py`): per-segment latest revision; updates with revision ≤ current, or for an already-final segment, are rejected and never forwarded. Finals are durable.
-- **Bounded server history**: finals kept in a deque bounded by 90 s **and** 2000 items; stale updates for evicted segments are rejected via a single "evicted floor" integer.
+- **Bounded server history**: finals kept in a deque bounded by 90 s **and** 6000 items (60 s of recovery even at ~100 segments/s), each HISTORY reply capped at 768 KiB; stale updates for evicted segments are rejected via a single "evicted floor" integer.
 - **Reconnect / late join**: on `CLIENT_HELLO` the server snapshots HISTORY and registers the client with no `await` in between (atomic in asyncio), so each final reaches the client exactly once. Fresh joins get the last `history_seconds` (≤ 60 s); resumes get every retained final after `last_segment`.
 - **Per-client buffering** (`liverecall/channel.py`): one bounded queue + sender task per client; the source never awaits a client. TODO (Day 2): lag-aware coalescing and bandwidth policy.
 - **Overload behaviour**: TODO (Day 2).

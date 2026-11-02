@@ -194,3 +194,54 @@ def test_history_message_is_valid_json():
     assert [i["segment"] for i in msg["items"]] == [1, 2]
     assert all(i["type"] == "CAPTION_UPDATE" and i["final"] for i in msg["items"])
     assert json.loads(history_message([])) == {"type": "HISTORY", "items": []}
+
+
+# --------------------------------------------------- high caption rates
+def test_sixty_seconds_recoverable_at_high_caption_rate():
+    """Caption rate is a hidden variable: 60 s must survive the item cap.
+
+    50 segments/s is ~37x the public source; the old 2000-item cap held only
+    40 s of it.
+    """
+    clock = FakeClock()
+    s = CaptionState(clock=clock)
+    for seg in range(1, 90 * 50 + 1):  # 90 s at 50 segments/s
+        s.apply(upd(seg, 1, final=True))
+        clock.t += 0.02
+    items = s.history_for(0, 0, 60)
+    assert len(items) >= 60 * 50 - 1
+    assert items[-1].segment == 90 * 50
+    assert len(history_message(items)) <= s.history_max_bytes
+
+
+def test_history_reply_trimmed_to_byte_budget_keeping_newest():
+    s = CaptionState(history_max_bytes=4096)
+    for seg in range(1, 101):
+        s.apply(upd(seg, 1, final=True, text="x" * 200))
+    items = s.history_for(0, 0, 60)
+    wire = history_message(items)
+    assert len(wire) <= 4096
+    segs = [c.segment for c in items]
+    assert segs == list(range(segs[0], 101))  # newest, contiguous, ordered
+    assert len(segs) > 1
+    # The next-older final would not have fitted.
+    unbounded = CaptionState()
+    for seg in range(1, 101):
+        unbounded.apply(upd(seg, 1, final=True, text="x" * 200))
+    older = {c.segment: c for c in unbounded.history_for(0, 0, 60)}[segs[0] - 1]
+    assert len(wire) + 1 + len(older.wire) > 4096
+
+
+def test_history_budget_exact_boundary():
+    s = CaptionState()
+    for seg in range(1, 6):
+        s.apply(upd(seg, 1, final=True))
+    full = history_message(s.history_for(0, 0, 60))
+    exact = CaptionState(history_max_bytes=len(full))
+    for seg in range(1, 6):
+        exact.apply(upd(seg, 1, final=True))
+    assert history_message(exact.history_for(0, 0, 60)) == full
+    tight = CaptionState(history_max_bytes=len(full) - 1)
+    for seg in range(1, 6):
+        tight.apply(upd(seg, 1, final=True))
+    assert [c.segment for c in tight.history_for(0, 0, 60)] == [2, 3, 4, 5]

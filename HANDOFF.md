@@ -52,7 +52,7 @@ python solution_server.py --port 8765              # the server itself
 
 1. **Source never awaits clients.** `handle_source` → `STATE.apply()` → `channel.offer()` for every client. `offer()` is synchronous; each client has its own sender task. A slow client can only hurt itself. (The starter `await`ed `gather(send...)` per update, so the slowest client paced everyone.)
 2. **Revision rules in one place** (`CaptionState._is_newer`): reject if revision ≤ held revision, if the segment is already final, or if the segment is older than anything retained (`_evicted_floor`). Rejected updates are never forwarded, so clients can't see stale/duplicate revisions from the server.
-3. **Bounded memory.** History deque bounded by **90 s and 2000 items** (spec needs 60 s; the margin covers gaps straddling the edge). Active (non-final) segments capped at 64. Evicted segments are remembered only as one integer. `test_long_lecture_stays_bounded` simulates an hour.
+3. **Bounded memory.** History deque bounded by **90 s and 6000 items** (spec needs 60 s; the margin covers gaps straddling the edge; raised from 2000 on 2 Nov, see "Update 2 Nov" at the end). Active (non-final) segments capped at 64. Evicted segments are remembered only as one integer. `test_long_lecture_stays_bounded` simulates an hour.
 4. **Atomic HISTORY + register.** In `handle_client`: `history_for()` → queue HISTORY as the channel's first message → add channel to `CHANNELS`, with **no `await` in between**. Updates applied after the snapshot go into the channel queue behind HISTORY, so every final arrives exactly once and in order. Proven by `test_joins_during_burst_see_every_final_exactly_once`.
 5. **HISTORY selection** (`history_for`):
    - Fresh join (`last_segment == 0`): finals from the last `history_seconds` (default 30, clamped to 60).
@@ -563,3 +563,31 @@ Memory is flat in both; server history plateaus at 120 finals after ~90 s (`[sta
 Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), report draft, from the tables in this section. Open for the team: re-running stress on the 4-vCPU Mininet VM; the end-of-window tail-loss trade-off above.
 
 Claude suggestions I rejected: the strike rule without the relapse exception (cost the bandwidth challenge, see fix 2); trusting the first memory run (it measured a shell).
+
+## Update 2 Nov — lihloway — teaching-team clarifications + history cap
+
+**Clarifications** from Prof. Anand (2 Nov, also on Canvas) are summarised in `CLAUDE.md` → "Teaching-team clarifications". In short:
+- no reader is permanently too slow for the finals stream;
+- no bandwidth is below what finals alone need;
+- completeness is measured after a *short* grace period;
+- **no unsolicited HISTORY**;
+- history and per-client state need fixed bounds, with 60 s of recovery.
+
+Our design already matches. The batching-finals-into-HISTORY idea is ruled out.
+
+**Burst probe** (WSL2, timer drift +0%, 100 clients, unmodified `load_clients.py` + `caption_source.py --revision-delay/--segment-gap`, 1 run each):
+
+| Source rate | plain FIFO | ours |
+|---|---|---|
+| 10× public (~33 msg/s) | 100% finals, P95 34 ms | 100%, P95 22 ms |
+| 40× public (~150 msg/s) | 100%, P95 6.7 ms | 100%, P95 6.1 ms |
+| 10× + 10% slow readers at 500 ms | 90.8%, slow P95 26 s | 90.8%, slow P95 26 s |
+
+The last row is out of scope per the clarifications: at 10× the finals alone (~11/s) outrun a 2 msg/s reader.
+
+**History cap 2000 → 6000 items, plus a 768 KiB cap per HISTORY reply** (`liverecall/state.py`):
+- **Why:** at high caption rates 2000 items held less than the required 60 s. Probe: source at ~40–50 segments/s for 55 s, 20% of clients join at 50 s asking for 60 s. With the old code they got exactly 2000 items and **final completeness was 97.27%**. With the new code they get ~2370 items (the full 60 s) and completeness is **100%**, 0 dup/stale, recovery P95 44 ms.
+- **Reply cap:** websockets clients, including `load_clients.py`, refuse messages over 1 MiB. So `history_for()` now keeps the newest finals that fit in 768 KiB (~3900 typical captions = 60 s at 50 segments/s). It only bites at extreme rates or with very long captions.
+- **Memory:** still a fixed bound, ~1.2 MB worst case. In the quick gate, RSS is unchanged (~33 MB).
+- **Tests:** 3 new in `tests/test_state.py`: 60 s recoverable at 50 segments/s; reply trimmed to its byte budget keeping the newest contiguous items; exact budget boundary. `pytest` 113 passed / 1 skipped (Windows and WSL2). `check.py` GATE PASSED (WSL2): t1–t4 + late 100% finals, 0 dup/stale.
+- **Not re-run:** the reference-VM tables in Day 4 part 2. The change only matters when history exceeds 2000 items, which no public test or Day 4 run reaches (5-min run plateaus at 120), so those numbers still hold.

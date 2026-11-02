@@ -58,12 +58,31 @@ python check.py              # ~3 min; must print "GATE PASSED" and timer drift 
 - Server → client: `HISTORY {items:[CAPTION_UPDATE...]}` first — finals only, oldest→newest, excluding anything the client already holds — then live `CAPTION_UPDATE`s.
 - A final is durable: no older or equal revision may ever replace it. Clients must never display an older revision after a newer one.
 
+## Teaching-team clarifications (Prof. Anand, 2 Nov 2026; also on Canvas)
+
+Answers to our questions about the hidden tests. Exact parameters stay hidden; this is the intended behaviour. **Treat these as part of the spec.**
+
+- **Slow readers:** no client will be made *permanently* too slow to keep up with the **final-caption stream alone**. The challenge is clients that can't keep up with the full stream of *provisional* revisions, while finals and the latest useful state are preserved.
+- **Final completeness:** measured after a **short, bounded** grace period for in-flight/recovery traffic. Don't rely on a long grace period or on an unbounded queue that only drains after the source stops.
+- **Unsolicited HISTORY: not allowed.** `HISTORY` is only for connect / reconnect / late-join recovery after `CLIENT_HELLO`. Live delivery uses `CAPTION_UPDATE` only. (So no "batch finals into a HISTORY message" for lagging clients.)
+- **Constrained bandwidth:** never set below what **final captions alone** need. Forwarding every provisional promptly is infeasible, so degrade gracefully: suppress obsolete provisionals, keep finals and the latest useful state.
+- **Bounded history:** retain enough finals for **60 s** of recovery/late join (more is allowed). History *and any per-client pending state* need a **fixed upper bound** that doesn't grow with lecture length or client delay. A client disconnected or unable to keep up beyond the retained window isn't guaranteed older captions.
+- **Graceful overload:** obsolete provisionals may be coalesced or discarded. Finals within the retained window must **not** be discarded to make room for provisionals, and the newest relevant revision of an active segment should be kept. No reliance on an unbounded per-client queue or a long backlog drained after the source stops.
+
+How our design maps onto this:
+- finals-only + coalescing while lagging (slow reader or slow link);
+- per-client queue capped (64 entries, 10 s age);
+- hopeless clients closed and recovered via HISTORY *after a new `CLIENT_HELLO`*, which is allowed;
+- history bounded by 90 s **and** 6000 items, which holds 60 s up to ~100 segments/s.
+
+Known residual risk: Day 4's end-of-run tail. A slow reader that retries full delivery in the last ~10–25 s may not drain before a *short* grace period ends; 99.87% in the 5-min run. See `HANDOFF.md`.
+
 ## Design rules we agreed on
 
 - **Source handler never awaits client sends.** It updates state and hands the update to each client's channel.
 - **One `ClientChannel` per client** (queue + sender task) with interface `offer(update)`; this is where backpressure lives.
 - **Snapshot history + register client for live updates with no `await` in between** (atomic in asyncio) — otherwise finals get duplicated or lost across HISTORY/live.
-- **Server history**: deque of finals bounded by time (e.g. 90 s) **and** a max count.
+- **Server history**: deque of finals bounded by time (90 s) **and** a max count (6000, enough for 60 s at high caption rates). Each HISTORY reply is capped at 768 KiB (newest items kept) so it never exceeds websockets clients' 1 MiB message limit.
 - **Overload policy**: under real lag only, coalesce provisional revisions per segment (keep newest); **never drop finals**; send the newest revision with its own `source_ts`. When the client catches up, return to full-update delivery (Normal Update Coverage is graded).
 - **Confirmed on Day 1:** for slow readers the backlog sits in the `websockets` receive queue and TCP buffers, *not* in our queue (`max_pending` stays 0 during T3). A bounded app queue alone can't fix slow-client freshness; we need a lag signal plus a cap on in-flight messages. See "Key finding" in `HANDOFF.md`.
 - Keep state/channel logic in plain classes that don't touch real sockets, so they are unit-testable.
