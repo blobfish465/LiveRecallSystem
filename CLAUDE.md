@@ -47,7 +47,7 @@ python check.py              # ~3 min; must print "GATE PASSED" and timer drift 
 - Server must ignore unknown fields and `SOURCE_DONE`, and survive malformed JSON / clients dropping mid-send.
 - Do not assume exactly 3 revisions per segment (public source does; hidden one may not).
 - Boundedness is graded as correctness: no unbounded history, per-client queue, or memory growth.
-- **The server path (`solution_server.py`, `liverecall/`) must run on Python 3.8 + websockets 13.1** (Ubuntu 20.04; the instructor's starter allows `websockets>=13`). `requirements.txt` says `websockets>=13.1,<17`: pip picks 13.1 on 3.8/3.9 and 16.x on 3.10+.
+- **The server path (`solution_server.py`, `liverecall/`) must run on Python 3.8 + websockets 13.1** (Ubuntu 20.04; the instructor's starter allows `websockets>=13`). `requirements.txt` uses per-version lines: **Python 3.10+ requires websockets 16.x** (pip also upgrades an older one already installed, so shared test clients get the library our lag policy was measured on), and 3.8/3.9 get `>=13.1,<16` (13.1 on 3.8).
   - Don't use: `@dataclass(slots=True)`, `X | Y` in runtime expressions (annotations are fine with `from __future__ import annotations`), `match`, `dict | dict`, `str.removeprefix`, `asyncio.to_thread`/`timeout`/`TaskGroup`.
   - Don't create asyncio objects (Event, Lock, Queue) outside a running loop (3.8 binds them at construction).
   - Import the server as `from websockets.asyncio.server import serve` (on 13.1 `websockets.serve` is the legacy one).

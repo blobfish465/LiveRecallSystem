@@ -655,7 +655,11 @@ One earlier final-code run showed 97.4% *public* completeness. That was the late
 
 ### Python 3.8 / websockets 13.1 (Ubuntu 20.04 grader insurance)
 
-- **Change:** `requirements.txt` is now `websockets>=13.1,<17`. On Python 3.10+, pip still installs 16.x, so nothing changes there. Code changes:
+- **Change:** `requirements.txt` has per-version lines:
+  - `websockets>=16,<17; python_version >= "3.10"`: unchanged guarantee on 3.10+.
+  - `websockets>=13.1,<16; python_version < "3.10"`: 13.1 on 3.8.
+  - **Why per-version, not one `>=13.1,<17` line:** pip doesn't upgrade a package that already satisfies the requirement. If the grader's environment already had websockets 13–15 (e.g. from the starter's `>=13,<17`), a loose line would leave it, and test clients sharing that environment would run the older client library. Verified: a Python 3.12 environment with websockets 15.0.1 is upgraded to 16.1.1 by `pip install -r requirements.txt`, and a fresh 3.8 install resolves to 13.1.
+- Code changes:
   - removed `@dataclass(slots=True)`;
   - the server imports `websockets.asyncio.server.serve` explicitly;
   - `ClientChannel` creates its asyncio Event lazily (3.8 binds an Event to the loop at construction).
