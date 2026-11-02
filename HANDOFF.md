@@ -680,3 +680,90 @@ One earlier final-code run showed 97.4% *public* completeness. That was the late
 Re-run the reference tables on the reference VM with the final code (`check.py --full --runs 3`, `bandwidth_test.py --apply ... --runs 3`, `hidden_sim.py --runs 3`). Two items are open for the report: the `bw2m_slow` residual, and the Python 3.8 T3 limitation.
 
 Claude suggestion I rejected: batching finals into a mid-stream `HISTORY` message for lagging clients. The teaching team ruled out unsolicited HISTORY on 2 Nov.
+
+## Update 2 Nov (3) — lihloway — large HISTORY on a shaped link (fix), high-latency links, grace margin
+
+WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0–1%, 1 run each unless stated (dev numbers).
+
+### Fix: cap TCP segment size at 1400 B (`MAX_SEGMENT`, `listening_socket()` in `solution_server.py`)
+
+**What failed:**
+- **Symptom:** `bw2m_late_long` (2 Mbit/s, 300 clients, non-repeating text, 20% join at 70 s asking 60 s) scored **80%** finals. The 60 late joiners made 103 connection attempts and received **zero** HISTORY messages and zero captions; 32 hopeless closes.
+- **Cause:** loopback's MTU is 64 KiB, so a large HISTORY reply leaves as **one** TCP segment. The public bandwidth profile's tbf (`burst 32kbit` = 4000 B) drops any packet bigger than its burst, every retransmit too, so the connection stalls for good. Day 3 saw the same with a 2 MB transfer.
+- **Why it matters:** the public transcript repeats 10 sentences, so permessage-deflate hid this. Real lecture text doesn't compress like that.
+
+**Direct probe** (2 Mbit/s tbf on the port, 40 incompressible finals, one client joins asking 60 s):
+
+| server | HISTORY (20.8 KB) |
+|---|---|
+| cap off | **never arrives** (stalled > 15 s) |
+| cap on | arrives in **0.04 s** |
+
+**Fix:**
+- The server builds its own listening socket with `TCP_MAXSEG = 1400` before `listen()`, and hands it to `serve(sock=...)`.
+- `ss -tni` shows mss 1388 on both ends (1400 minus TCP timestamp options).
+- On a real Ethernet path this is roughly the MSS anyway, so it only changes loopback behaviour.
+- Works on websockets 13.1 and 16. Where the option is unsupported (some Windows versions) it's skipped.
+
+**Cost:** none measurable. `bandwidth_test.py --apply --clients 500 --duration 60`, 3 runs each, interleaved:
+
+| | cap off | cap on |
+|---|---|---|
+| finals due % | 100 / 100 / 100 | 100 / 100 / 100 |
+| P50 ms | 692 / 646 / 634 | 657 / 617 / 617 |
+| P95 ms | 1074 / 1044 / 1068 | 1072 / 1075 / 1073 |
+| fresh finals % | 23.0 / 39.2 / 41.9 | 29.9 / 43.5 / 41.0 |
+| coverage % | 77.5 / 74.5 / 72.1 | 77.1 / 72.5 / 73.2 |
+
+Test: `test_listening_socket_caps_segment_size` (runs on Linux, skipped where the option can't be read).
+
+### New `hidden_sim.py` scenarios (18 in total now; component `delay` added)
+
+Tool fixes:
+- shaping is applied after the server listens (`run_demo.wait_for_port` gives each connect 0.25 s, which a 600 ms RTT never meets);
+- late joins in the large-HISTORY scenarios happen at 55 s, so 60 s of history can cover everything. At 70 s the first 10 s are unrecoverable by design, and the public analyser counts them as lost.
+
+| Scenario | FIFO due % | ours due % | Notes |
+|---|---:|---:|---|
+| late_long_text: unique text, 20% drop at 70 s, 20% join at 55 s (60 s) | 100 | 100 | recovery P95 6 ms |
+| bw2m_late_long: same on 2 Mbit/s, 300 clients | 100 | 100 | at 55 s the reply happened to stay under 4000 B even without the cap (A/B passed); the probe above is the deterministic test |
+| delay300: 300 ± 100 ms each way | 100 | 100 | **coverage 40.5% vs 99.9%**; P95 1345 vs 1429 ms |
+| delay300_loss: + 3% loss | 100 | 100 | **coverage 38.6% vs 98.9%**; P95 2452 vs 2446 ms |
+| delay300_slow: + 10% slow readers | 95.5 | **100** | coverage 40.8% vs 94.7%; slow P95 9.1 s vs 29.2 s |
+
+### Known trade-off: false "slow link" lag on high-latency, high-jitter links
+
+On `delay300*` every client was classified as a slow link (154–182 lag entries per 60 s, 0 as reader).
+- The kernel RTT (~600 ms) is above `LINK_RTT_S`.
+- netem's ±100 ms jitter reorders packets, so retransmits occasionally hold a pong past `LAG_S = 1 s`.
+- Day 4's relapse rule then re-enters lag at the next late pong. Clients spend most of the run finals-only.
+
+**Cost:** coverage (~40% vs ~99%). Not finals (100%), and not freshness (P95 equal or better).
+
+**Not fixed, deliberately:** any rule that tolerates late pongs on high-RTT links would also slow congestion detection on the 2 Mbit/s test (adv2, 6 marks), and retuning means re-measuring T3, T5, bandwidth and convergence. The public T5 profile (120 ± 30 ms) is unaffected (Day 4: coverage 99.93%). For the report: limitation + future work (e.g. judge lateness relative to the RTT, or detect congestion from TCP_INFO queue growth).
+
+### Grace-period margin (re-analysis of every saved hidden_sim run)
+
+"Finals due" recomputed with 0 / 1 / 2 / 3 s grace:
+- **Final code, 0 s grace:** 100% everywhere except `bw2m_slow` 99.84 and `bw2m_loss` 99.99. With 1 s grace, `bw2m_loss` reaches 100.
+- **Plain FIFO:** below 100 in 5 scenarios at every grace value (85–99.7%).
+
+So our completeness doesn't depend on the evaluator's grace period being generous.
+
+### Numbers today (WSL2, quick gate, final code, 1 run)
+
+```
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients):  P50 7.3 ms, P95 20.6 ms, P99 27.3 ms, completeness 100%
+- T3 (10% slow):     completeness 100%, coverage 95.1%, P95 799 ms (all clients)
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, recovery P95 3.0 ms
+```
+
+### Next person should start with
+
+Re-run on the reference VM with the final code: `check.py --full --runs 3`, `bandwidth_test.py --apply --clients 500 --duration 60 --runs 3`, `hidden_sim.py --runs 3`.
+
+Report items:
+- the HISTORY stall and the MSS cap (a good "experiment that surprised us");
+- the high-latency coverage trade-off;
+- the Python 3.8 note.

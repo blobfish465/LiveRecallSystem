@@ -92,6 +92,7 @@ Known residual risk: Day 4's end-of-run tail. A slow reader that retries full de
   - A lagging client that disconnects resumes lag mode on reconnect (bounded `LagMemory` by client_id, kept 120 s) instead of being flooded with the full stream again.
   - In slow-link lag, a pong pending > max(6 s, 4 × RTT) reclassifies the client as a slow reader (longer recovery wait).
   - Found with `hidden_sim.py` (slow700, bw2m_slow); see `HANDOFF.md` "Update 2 Nov (2)".
+- **TCP segment cap (2 Nov):** the server's listening socket sets `TCP_MAXSEG = 1400`. On loopback (MTU 64 KiB) the public 2 Mbit/s tbf (burst 4000 B) drops any larger segment for good, so a big HISTORY reply stalled its connection. Keep the cap; see `HANDOFF.md` "Update 2 Nov (3)".
 - **Confirmed on Day 1:** for slow readers the backlog sits in the `websockets` receive queue and TCP buffers, *not* in our queue (`max_pending` stays 0 during T3). A bounded app queue alone can't fix slow-client freshness; we need a lag signal plus a cap on in-flight messages. See "Key finding" in `HANDOFF.md`.
 - Keep state/channel logic in plain classes that don't touch real sockets, so they are unit-testable.
 
