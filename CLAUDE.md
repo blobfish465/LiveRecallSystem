@@ -106,9 +106,9 @@ Known residual risk: Day 4's end-of-run tail. A slow reader that retries full de
 | 5 | Frankfurters | Charts, README (reproducible from a fresh clone), report draft from the Day 4 tables | Charts + README + report draft committed |
 | Meet-up | All | Integration fixes, demo video (5–7 min), `AI_USAGE.md`, `CONTRIBUTIONS.md`, final report, `submission_check.py --final`, viva walkthrough of each other's code | Submitted |
 
-Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — WSL is not the reference environment. **Team decision: the reference environment is the CS3103 Mininet lab Ubuntu VM** (allowed by the spec); the report's final tables come from it. If you don't have it, a fresh Ubuntu VM (e.g. `multipass launch --name liverecall --cpus 2 --memory 4G --disk 15G`) is the next best option.
+Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — WSL is not the reference environment. **Team decision (2 Nov): the reference environment is Frankfurters' Ubuntu 26.04.1 LTS VM** (Apple Silicon, aarch64, 2 vCPU, 5 GB, Python 3.14, timer drift +0–1%). Every final report table comes from it, on the final code (Day 4 part 2 in `HANDOFF.md`; data in `report/data/`), labelled "Ubuntu 26.04 VM (2 vCPU), median of 3". It replaces the earlier choice of the Mininet lab VM, because all final experiments already ran there on one code version; re-running everything elsewhere would cost ~2.5 h of machine time for no gain. Caveat to state in the report: with 2 vCPUs the 500-client stress/bandwidth runs share the CPU with the load generator, so their latencies are upper bounds. Day 1–3 numbers (WSL2, Mininet VM) stay in `HANDOFF.md` as development history; don't mix them into report tables. Any re-run for the report must use this VM.
 
-**Before trusting any numbers, check `check.py`'s `asyncio timer drift` line (must be < 10%).** VirtualBox/Multipass on a Windows PC with Hyper-V on (WSL2, Docker, Core isolation) runs in "NEM" mode with timers 100–200% late, which makes every metric meaningless (see "Test environments" in `HANDOFF.md`). WSL2 is accurate and fine for development; the report's final tables should come from a full Ubuntu VM with valid timers, or be labelled WSL2.
+**Before trusting any numbers, check `check.py`'s `asyncio timer drift` line (must be < 10%).** VirtualBox/Multipass on a Windows PC with Hyper-V on (WSL2, Docker, Core isolation) runs in "NEM" mode with timers 100–200% late, which makes every metric meaningless (see "Test environments" in `HANDOFF.md`). WSL2 is accurate and fine for development; the report's final tables come from the reference VM above.
 
 ## Testing rules (every day)
 
@@ -154,7 +154,7 @@ Coverage checklist (spec gaps that public tests don't exercise — make sure eac
 - Don't change the protocol's required fields or the CLI. Don't edit instructor harness files.
 - When a choice affects another day's work (e.g. the `ClientChannel` interface), note it in `HANDOFF.md`.
 - If results look surprisingly bad, first check the environment: timer drift in `check.py`'s first line, and whether the naive starter (`git show e131719:solution_server.py`) scores the same. Don't debug the server against numbers from a broken environment.
-- Report numbers honestly: say which environment (WSL2 / Mininet VM / Windows) and whether it's 1 run or the median of 3.
+- Report numbers honestly: say which environment (reference VM / WSL2 / Mininet VM / Windows) and whether it's 1 run or the median of 3. Report tables use the reference VM only.
 
 ## Grading reminders
 

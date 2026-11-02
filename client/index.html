@@ -18,6 +18,7 @@
 
     /* Live panel: one row per segment, updated in place. */
     #live { min-height: 8rem; max-height: 22rem; overflow-y: auto; border: 1px solid #bbb; border-radius: .4rem; padding: .5rem; }
+    #live:empty::before { content: "Waiting for captions…"; color: #888; font-style: italic; }
     .caption { display: flex; gap: .7rem; padding: .3rem .5rem; border-left: 4px solid #ccc; margin: .15rem 0; }
     .caption .meta { font-family: ui-monospace, monospace; font-size: .85rem; color: #888; min-width: 6rem; }
     .caption.provisional { color: #666; font-style: italic; border-color: #e0a800; }
@@ -27,10 +28,14 @@
     .controls button { padding: .55rem .75rem; margin: .2rem .2rem .2rem 0; border: 1px solid #999; border-radius: .4rem; background: #f3f3f3; cursor: pointer; }
     .controls button.primary { background: #0b5fd6; color: #fff; border-color: #0b5fd6; font-weight: 600; }
     .controls button.active { outline: 3px solid #8ab4f8; }
-    .controls button#drop { float: right; background: #fff; }
 
-    #recall { border-left: 3px solid #1a7f37; padding-left: 1rem; margin-top: .5rem; }
+    /* Bounded like the live panel, so a 60 s recall does not push the page down. */
+    #recall { border-left: 3px solid #1a7f37; padding-left: 1rem; margin-top: .5rem; max-height: 18rem; overflow-y: auto; }
+    #recall:empty { display: none; }
     #recall p { margin: .3rem 0; }
+    #recall .age { font-family: ui-monospace, monospace; font-size: .85rem; color: #888; margin-right: .6rem; }
+    .demo { font-size: .85rem; color: #777; margin-top: 1.5rem; }
+    .demo button { padding: .3rem .6rem; border: 1px solid #bbb; border-radius: .4rem; background: #fff; cursor: pointer; }
     #stats { font-family: ui-monospace, monospace; font-size: .8rem; color: #777; word-break: break-all; }
   </style>
 </head>
@@ -48,11 +53,14 @@
     <button data-seconds="15">15 s</button>
     <button data-seconds="30">30 s</button>
     <button data-seconds="60">60 s</button>
-    <button id="drop" title="Close the connection for 5 s to show automatic reconnect and recovery">Simulate 5 s network drop</button>
+    <button id="recall-hide">Hide</button>
   </div>
   <p id="recall-title" class="hint">Shows finalized captions already stored in this page; nothing is requested from the server.</p>
   <div id="recall"></div>
 
+  <p class="demo">Demo tools (not needed in class):
+    <button id="drop" title="Close the connection for 5 s to show automatic reconnect and recovery">Simulate 5 s network drop</button>
+  </p>
   <p id="stats"></p>
 
   <script src="store.js"></script>

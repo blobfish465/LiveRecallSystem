@@ -560,7 +560,7 @@ Memory is flat in both; server history plateaus at 120 finals after ~90 s (`[sta
 - T5 (delay_loss):   P50 262 ms, P95 770 ms, completeness 100%, coverage 99.93%
 
 ### Next person should start with
-Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), report draft, from the tables in this section. Open for the team: re-running stress on the 4-vCPU Mininet VM; the end-of-window tail-loss trade-off above.
+Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), report draft, from the tables in this section. **Charts (muhdbhz): the curated data is in `report/data/` (every run of every table, ~160 KB); start with `report/data/README.md`.** Results section draft: `report/results.md`. Open for the team: re-running stress on the 4-vCPU Mininet VM; the end-of-window tail-loss trade-off above.
 
 Claude suggestions I rejected: the strike rule without the relapse exception (cost the bandwidth challenge, see fix 2); trusting the first memory run (it measured a shell).
 
