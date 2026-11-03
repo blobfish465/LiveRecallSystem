@@ -95,7 +95,7 @@
   6. **The tests used `asyncio.timeout`** (Python 3.11+) and failed on Ubuntu 22.04's Python 3.10. Replaced with `asyncio.wait_for`.
 - **What I checked myself:**
   1. I ensured architecture, revision rules and recovery were written as expected, and reviewed code pushed to the team.
-  2. I questioned all details regarding bounded states, to ensure that it was up to par and meeting expectations.
+  2. I questioned all details regarding bounded states, to ensure that they were up to par and met requirement 8 of the updated spec.
   3. I questioned the AI's design choices against the spec and the teaching team's 2 Nov clarifications rather than accepting them.
   4. I made the environment decisions myself:
      - kept my VM untouched until I chose to allow it;
