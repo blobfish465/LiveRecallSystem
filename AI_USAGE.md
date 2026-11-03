@@ -13,7 +13,7 @@
   1. An early idea was to also send the in-progress segment's latest provisional right after HISTORY on connect, so a late joiner sees the current line immediately. Rejected: the server only knows the client's latest *final*, not which provisional it already saw. After a very short reconnect the client may already hold that exact revision, and the harness counts a repeat as a `duplicate`. The next live revision arrives within ~0.35 s anyway.
   2. The first generated channel test asserted that every queued provisional had already been superseded. That is wrong by design: provisionals are only dropped once the queue is over its cap (full delivery under normal load is graded via Normal Update Coverage). The test was rewritten to check the cap, that all finals survive, and the exact drop count.
   3. **Test environment (the main one, see final section below):** the AI suggested running the Ubuntu experiments in a VirtualBox VM (and the original plan suggested Multipass). On this Windows laptop that produced invalid numbers, which it initially reported as test results before the root cause was found. Switched to WSL2 for development and added a timer-drift check.
-- **What I checked myself:** TODO (lihloway: fill in what you read/verified so you can defend it in the viva).
+- **What I checked myself:** see the 2–3 Nov entry below, which covers both of my sessions.
 
 ### Day 2 (muhdbhz) — slow-reader backpressure
 
@@ -74,13 +74,54 @@
   2. Its first two attempts at the 5-minute memory run measured the wrong process: `pgrep -f solution_server.py` matched the shell running the command (3.6 MB flat, which looks like perfect boundedness). Caught because 3.6 MB is too small for a Python server; fixed by matching `python -u solution_server.py` from a script file.
 - **What I checked myself:** TODO (Frankfurters).
 
+### 2–3 Nov (lihloway) — hidden-condition testing, four server fixes, Python 3.8
+
+- **Tool:** Claude Code (Claude Opus 5.5).
+- **Used for:**
+  - `hidden_sim.py`: 25 scenarios beyond the public tests, built on the unmodified harness, with a test-only `custom_source.py`, flapping clients and multi-process load.
+  - Diagnosing the failures it found.
+  - Four server fixes: history cap + HISTORY byte cap, lag memory across reconnects, slow-reader reclassification on slow links, TCP segment cap.
+  - Python 3.8 support.
+  - The handoff notes, and plain-language explanations of the design for the report.
+- **Useful suggestions:**
+  1. **Test the hidden variables, not just the public tests.** Running the unmodified public client under conditions the public tests don't cover found a real failure. On the public 2 Mbit/s profile, a large HISTORY reply leaves loopback as one TCP segment bigger than the shaper's 4000-byte burst, so it is dropped on every retransmit and the connection stalls for good. All 60 late joiners in that scenario received no HISTORY and no captions (80% finals). A direct probe confirmed it (a 20.8 KB HISTORY never arrives) and the fix: capping TCP segments at 1400 B makes it arrive in 0.04 s, with no cost on the bandwidth test (3+3 runs).
+  2. **A "finals due" metric** that excuses only finals sent in the last 3 s before the clients stop. It separates end-of-run artefacts from real losses, and the per-client breakdowns behind it showed which failures were real (`slow700`, `bw2m_slow`) and which weren't.
+- **Suggestions that were wrong or changed:**
+  1. **Batching finals into a mid-stream HISTORY message** for lagging clients, so slow readers could take in many finals per read. The teaching team's 2 Nov clarification ruled out unsolicited HISTORY, so it was dropped.
+  2. **Raising the history cap from 2000 to 6000** on its own would have let a 60 s HISTORY exceed the 1 MiB message limit of websockets clients, which drop the connection. Added a 768 KiB cap per reply that keeps the newest finals.
+  3. **Python 3.8 support as a single `websockets>=13.1,<17` line.** pip does not upgrade a package that already satisfies a requirement, so a shared grader environment with websockets 13–15 would keep it, and test clients there would get the older client library, under which our slow-reader advantage disappears. Changed to per-version lines: 16.x on Python 3.10+, the old range only on 3.8/3.9. Verified that 15.0.1 gets upgraded to 16.1.1.
+  4. **Two "regressions" that weren't.** It first treated finals lost in `bw2m_lifted` and on the 2 Mbit/s test as server problems. A per-client breakdown showed every client missing only the last 2–4 segments, because the source's own handshake had crossed the saturated link and started 3.4 s late: an artefact of fixed-length runs, seen in both configurations.
+  5. **The first A/B of the TCP segment cap** used a late join at 55 s, whose HISTORY happened to compress under 4000 B, so even the uncapped server passed and the A/B proved nothing. Replaced with a deterministic probe using incompressible text. The patch that disabled the cap for that A/B had also silently matched nothing (CRLF line endings in the copied files); caught by counting the patched lines before the run.
+  6. **The tests used `asyncio.timeout`** (Python 3.11+) and failed on Ubuntu 22.04's Python 3.10. Replaced with `asyncio.wait_for`.
+- **What I checked myself:**
+  1. I ensured architecture, revision rules and recovery were written as expected, and reviewed code pushed to the team.
+  2. I questioned all details regarding bounded states, to ensure that it was up to par and meeting expectations.
+  3. I questioned the AI's design choices against the spec and the teaching team's 2 Nov clarifications rather than accepting them.
+  4. I made the environment decisions myself:
+     - kept my VM untouched until I chose to allow it;
+     - required a full Ubuntu environment for reported numbers;
+     - accepted WSL2 only for development numbers once the timer check showed VirtualBox on Hyper-V was invalid.
+  5. I reviewed what each push contained (files and commits) before allowing it, and asked whether each Python 3.8 change could affect performance on the grader's likely Python 3.10+ setup before keeping it.
+
 ## Tools used
 
-TODO (final): list all tools across the team.
+- **Claude Code** (Anthropic), used by all four members:
+  - **Claude Opus 5.5:** main model for every member.
+  - **Sonnet sub-agents:** implementation steps on Day 2.
+  - **Fable 5.1, with reviewer and skeptic sub-agents:** Day 3, to check each change before it was committed.
+- **What it was used for:** explaining the spec, the harness and our own code; designing and implementing the server, the overload policy, the browser client and our test tools; running and analysing experiments; drafting handoff notes and documentation. Every commit was reviewed, explained back and pushed by the team member named in `CONTRIBUTIONS.md`.
+- TODO (team): confirm nobody used any other AI tool (ChatGPT, Copilot, Gemini, ...); add it here if they did.
 
 ## One useful suggestion
 
-TODO (final).
+**Using the WebSocket pong delay as the lag signal** (Day 2, muhdbhz).
+
+- **The problem:** `ws.send()` returns as soon as bytes reach the socket buffers, so a slow reader's backlog never shows in the server's own queue. Day 1 measured `max_pending = 0` throughout T3 while slow clients fell 15 s behind and lost about half their finals.
+- **The suggestion:** the websockets client stops parsing incoming frames, pings included, once 16 messages are unread. So a pong that comes back late is direct evidence that this client has not processed what we sent, at no protocol cost: ping/pong are standard WebSocket control frames.
+- **How we verified it:**
+  - **T3:** final completeness 95.1% → 100%, slow-reader P95 28 s → 9.6 s, with normal clients unaffected (reference VM, median of 3).
+  - **Harder variants:** every slow-reader variant in `hidden_sim.py` (30% slow readers, 8 revisions per segment, a 3× faster source, 1500 clients) stayed at 100% where a plain queue lost 4–14% of finals.
+  - **Refined later:** Day 4 added a ping budget, and the kernel's TCP RTT to tell slow links from slow readers. The core idea is unchanged.
 
 ## One suggestion that was wrong, inefficient, or required modification
 
@@ -93,7 +134,7 @@ TODO (final).
 **Correction:**
 - Ran the Ubuntu development tests in **WSL2 Ubuntu 24.04** instead. It runs directly on Hyper-V, has accurate timers (+0% drift) and real `sch_netem`/`sch_tbf` kernel modules. We label these numbers "WSL2, dev only", because the spec says WSL isn't the reference environment.
 - Added an **automatic timer-drift check to `check.py`**: it measures asyncio sleep overrun before every run and warns above 10%.
-- Team decision: the report's final tables come from the **CS3103 Mininet lab VM**, run on a machine where the drift check passes.
+- Team decision: the report's final tables all come from one reference Ubuntu VM with valid timers (Frankfurters' Ubuntu 26.04 VM, timer drift +0–1%), never from a machine that fails the drift check.
 
 **Lesson:** a benchmark harness measures the machine as much as the code. Validate the environment (timer accuracy, a known-good baseline) before trusting or debugging against the numbers.
 
