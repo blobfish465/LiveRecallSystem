@@ -33,12 +33,19 @@ import time
 from typing import Any
 
 import websockets
+# The asyncio implementation explicitly: it is `websockets.serve` from 14.0 on,
+# but on websockets 13.1 (the newest for Python 3.8) `websockets.serve` is still
+# the legacy one. Importing it by name gives the same server on 13.1 to 16.x.
+from websockets.asyncio.server import serve
 
-from liverecall.channel import ClientChannel
+from liverecall.channel import ClientChannel, LagMemory
 from liverecall.state import CaptionState, history_message
 
 STATE = CaptionState()
 CHANNELS: set[ClientChannel] = set()
+# Lag state of recently closed lagging clients, so a reconnect resumes lag mode
+# instead of flooding a known-slow reader again (bounded; see liverecall/channel.py).
+LAG_MEMORY = LagMemory()
 # Strong references to fire-and-forget tasks so they are not garbage-collected.
 _BACKGROUND: set[asyncio.Task] = set()
 
@@ -57,7 +64,8 @@ NO_COALESCE = False
 NOTSENT_LOWAT = 512
 WRITE_HIGH = 512
 # Counters of channels that have closed, so the [stats] totals survive disconnects.
-CLOSED_TOTALS = {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0}
+CLOSED_TOTALS = {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0,
+                 "lag_resumed": 0, "reclassified": 0}
 
 
 def _spawn(coro) -> None:
@@ -160,7 +168,7 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
     else:
         tighten_send_path(ws)
         channel = ClientChannel(ws.send, client_id=client_id, on_overflow=on_overflow,
-                                ping=ws.ping, rtt=kernel_rtt(ws))
+                                ping=ws.ping, rtt=kernel_rtt(ws), lag_memory=LAG_MEMORY)
 
     # --- atomic section: no await between snapshot and registration ---------
     items = STATE.history_for(last_segment, last_revision, hello.get("history_seconds"))
@@ -189,6 +197,8 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         CLOSED_TOTALS["lag_entries"] += channel.lag_entries
         CLOSED_TOTALS["link_lag_entries"] += channel.link_lag_entries
         CLOSED_TOTALS["hopeless_closes"] += channel.overflowed
+        CLOSED_TOTALS["lag_resumed"] += channel.lag_resumed
+        CLOSED_TOTALS["reclassified"] += channel.reclassified
         print(f"client disconnected: id={client_id}; clients={len(CHANNELS)}", flush=True)
 
 
@@ -226,6 +236,8 @@ def stats_line() -> str:
     coalesced = CLOSED_TOTALS["coalesced"] + sum(c.coalesced for c in live)
     lag_entries = CLOSED_TOTALS["lag_entries"] + sum(c.lag_entries for c in live)
     link_lag = CLOSED_TOTALS["link_lag_entries"] + sum(c.link_lag_entries for c in live)
+    resumed = CLOSED_TOTALS["lag_resumed"] + sum(c.lag_resumed for c in live)
+    reclassified = CLOSED_TOTALS["reclassified"] + sum(c.reclassified for c in live)
     return (
         f"[stats {time.strftime('%H:%M:%S')}] clients={len(live)} "
         f"lagging={sum(c.lagging for c in live)} "
@@ -233,15 +245,40 @@ def stats_line() -> str:
         f"max_pending={max((c.pending for c in live), default=0)} "
         f"coalesced_total={coalesced} lag_entries_total={lag_entries} "
         f"link_lag_entries_total={link_lag} "
-        f"hopeless_closes_total={CLOSED_TOTALS['hopeless_closes']}"
+        f"hopeless_closes_total={CLOSED_TOTALS['hopeless_closes']} "
+        f"lag_resumed_total={resumed} reclassified_total={reclassified}"
     )
 
 
+# Largest TCP segment (MSS) on our connections, set on the listening socket so it is
+# in place before any handshake and is announced to clients. Loopback's MTU is 64 KiB,
+# so without it one large message (a 60 s HISTORY of real text, ~6+ KB compressed)
+# leaves as one segment, and the public bandwidth profile's tbf (burst 4000 B) drops
+# any packet larger than its burst every time: the connection stalls for good.
+# hidden_sim bw2m_late_long: all 60 clients joining at 70 s got no HISTORY and no
+# captions (103 connects, 32 hopeless closes, 80% finals). 1400 B is about what an
+# Ethernet path gives anyway, so this only changes loopback behaviour.
+MAX_SEGMENT = 1400
+
+
+def listening_socket(port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name == "posix":  # what asyncio.create_server sets; on Windows it would allow port stealing
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    maxseg = getattr(socket, "TCP_MAXSEG", None)
+    if maxseg is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, maxseg, MAX_SEGMENT)
+        except OSError:
+            pass  # not supported here (e.g. some Windows versions): keep the default
+    sock.bind(("0.0.0.0", port))
+    return sock
+
+
 async def main_async(port: int) -> None:
-    async with websockets.serve(
+    async with serve(
         handler,
-        "0.0.0.0",
-        port,
+        sock=listening_socket(port),
         max_size=2**20,
         # Default 32 KiB. Day 2 lowered it so a congested link's backlog stays
         # in our outbox (Day 3: no measurable effect on its own). Kept for the

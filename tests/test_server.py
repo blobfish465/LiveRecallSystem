@@ -8,6 +8,7 @@ import pytest
 import websockets
 
 import solution_server
+from liverecall.channel import LagMemory
 from liverecall.state import CaptionState
 
 
@@ -15,7 +16,8 @@ from liverecall.state import CaptionState
 def fresh_server_state(monkeypatch):
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
     monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
-                        {"coalesced": 0, "lag_entries": 0, "link_lag_entries": 0, "hopeless_closes": 0})
+                        {key: 0 for key in solution_server.CLOSED_TOTALS})
+    monkeypatch.setattr(solution_server, "LAG_MEMORY", LagMemory())
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()
@@ -259,3 +261,20 @@ def test_stats_totals_survive_disconnect():
         await server.wait_closed()
 
     asyncio.run(main())
+
+
+def test_listening_socket_caps_segment_size():
+    """Loopback's 64 KiB MTU + the public tbf (burst 4000 B) stall any larger segment for good."""
+    import socket
+    sock = solution_server.listening_socket(0)
+    try:
+        maxseg = getattr(socket, "TCP_MAXSEG", None)
+        if maxseg is None:
+            pytest.skip("TCP_MAXSEG not available on this platform")
+        try:
+            value = sock.getsockopt(socket.IPPROTO_TCP, maxseg)
+        except OSError:
+            pytest.skip("TCP_MAXSEG not readable on this platform")
+        assert 0 < value <= solution_server.MAX_SEGMENT < 4000
+    finally:
+        sock.close()

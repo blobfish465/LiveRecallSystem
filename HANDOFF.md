@@ -52,7 +52,7 @@ python solution_server.py --port 8765              # the server itself
 
 1. **Source never awaits clients.** `handle_source` → `STATE.apply()` → `channel.offer()` for every client. `offer()` is synchronous; each client has its own sender task. A slow client can only hurt itself. (The starter `await`ed `gather(send...)` per update, so the slowest client paced everyone.)
 2. **Revision rules in one place** (`CaptionState._is_newer`): reject if revision ≤ held revision, if the segment is already final, or if the segment is older than anything retained (`_evicted_floor`). Rejected updates are never forwarded, so clients can't see stale/duplicate revisions from the server.
-3. **Bounded memory.** History deque bounded by **90 s and 2000 items** (spec needs 60 s; the margin covers gaps straddling the edge). Active (non-final) segments capped at 64. Evicted segments are remembered only as one integer. `test_long_lecture_stays_bounded` simulates an hour.
+3. **Bounded memory.** History deque bounded by **90 s and 6000 items** (spec needs 60 s; the margin covers gaps straddling the edge; raised from 2000 on 2 Nov, see "Update 2 Nov" at the end). Active (non-final) segments capped at 64. Evicted segments are remembered only as one integer. `test_long_lecture_stays_bounded` simulates an hour.
 4. **Atomic HISTORY + register.** In `handle_client`: `history_for()` → queue HISTORY as the channel's first message → add channel to `CHANNELS`, with **no `await` in between**. Updates applied after the snapshot go into the channel queue behind HISTORY, so every final arrives exactly once and in order. Proven by `test_joins_during_burst_see_every_final_exactly_once`.
 5. **HISTORY selection** (`history_for`):
    - Fresh join (`last_segment == 0`): finals from the last `history_seconds` (default 30, clamped to 60).
@@ -564,22 +564,260 @@ Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), 
 
 Claude suggestions I rejected: the strike rule without the relapse exception (cost the bandwidth challenge, see fix 2); trusting the first memory run (it measured a shell).
 
-## Day 5 — Frankfurters — faster/bursty source (`burst_test.py`), report support
+## Update 2 Nov — lihloway — teaching-team clarifications + history cap
 
-Done: README test commands; `report/results.md` (results section draft); curated data for the charts in `report/data/` (handoff note for muhdbhz: `report/data/README.md`); T3 before/after on the final code (FIFO 95.13% vs ours 100% finals; in the results draft); `CONTRIBUTIONS.md` draft; reference environment recorded in `CLAUDE.md`; and the faster/bursty-source test below. No server code changed on Day 5.
+**Clarifications** from Prof. Anand (2 Nov, also on Canvas) are summarised in `CLAUDE.md` → "Teaching-team clarifications". In short:
+- no reader is permanently too slow for the finals stream;
+- no bandwidth is below what finals alone need;
+- completeness is measured after a *short* grace period;
+- **no unsolicited HISTORY**;
+- history and per-client state need fixed bounds, with 60 s of recovery.
 
-### Faster / bursty source (`burst_test.py`, 100 clients, 40 s, median of 3, reference VM, drift +0%)
+Our design already matches. The batching-finals-into-HISTORY idea is ruled out.
 
-The spec's hidden evaluation may vary "caption revision rate and burstiness" (section 10), which no public test exercises. `burst_test.py` repeats `run_demo.py`'s wiring with the unmodified harness and only passes `caption_source.py`'s own `--revision-delay` / `--segment-gap` (and a mixed transcript: the public generator emits 1 revision for sentences under 4 words, 3 otherwise).
+**Burst probe** (WSL2, timer drift +0%, 100 clients, unmodified `load_clients.py` + `caption_source.py --revision-delay/--segment-gap`, 1 run each):
 
-| scenario | source pace | finals | coverage | P50 / P95 / P99 | fresh | dup / stale / errors |
-|---|---|---:|---:|---:|---:|---:|
-| `fast5_mixed` | 50 ms / 50 ms, 1 or 3 revisions (~20 msg/s, 5x) | 100% | 100% | 5.2 / 18.4 / 53.6 ms | 100% | 0 / 0 / 0 |
-| `fast12` | 20 ms / 20 ms (~50 msg/s, 12x) | 100% | 100% | 4.4 / 9.4 / 23.2 ms | 100% | 0 / 0 / 0 |
-| `burst` | 3 revisions back to back, 0.35 s gap | 100% | 100% | 9.9 / 22.9 / 40.0 ms | 100% | 0 / 0 / 0 |
+| Source rate | plain FIFO | ours |
+|---|---|---|
+| 10× public (~33 msg/s) | 100% finals, P95 34 ms | 100%, P95 22 ms |
+| 40× public (~150 msg/s) | 100%, P95 6.7 ms | 100%, P95 6.1 ms |
+| 10× + 10% slow readers at 500 ms | 90.8%, slow P95 26 s | 90.8%, slow P95 26 s |
 
-(Run with the same driver logic before it moved into the repo; data in `report/data/burst.json`.)
+The last row is out of scope per the clarifications: at 10× the finals alone (~11/s) outrun a 2 msg/s reader.
 
-**Out of scope, measured anyway:** a 5x source *plus* 10% T3 readers (500 ms/msg). The source then sends ~6.6 finals/s and a reader takes 2 msg/s, so it cannot keep up even with finals alone: FIFO 91.06%, ours 92.07% finals (normal clients unaffected, P95 ~10 ms). Our hopeless-client close (1013) never reaches those readers before a test ends, because the close frame queues behind their backlog. A TCP reset instead (SO_LINGER 0) helped (99.67–99.88% in 40 s runs, 96.74% at 60 s) but could not skip what was already in the client's buffers, so recovery depended on timing. **Reverted** after reading the spec: requirement 11 says "the evaluation will not intentionally make a client permanently so slow that it cannot keep up even with the final-caption stream alone", so this case is excluded, and we did not change the server two days before the deadline. Worth knowing for the viva ("what if a reader is slower than the finals?": it is closed as hopeless and recovers via HISTORY, where one message carries all missed finals).
+**History cap 2000 → 6000 items, plus a 768 KiB cap per HISTORY reply** (`liverecall/state.py`):
+- **Why:** at high caption rates 2000 items held less than the required 60 s. Probe: source at ~40–50 segments/s for 55 s, 20% of clients join at 50 s asking for 60 s. With the old code they got exactly 2000 items and **final completeness was 97.27%**. With the new code they get ~2370 items (the full 60 s) and completeness is **100%**, 0 dup/stale, recovery P95 44 ms.
+- **Reply cap:** websockets clients, including `load_clients.py`, refuse messages over 1 MiB. So `history_for()` now keeps the newest finals that fit in 768 KiB (~3900 typical captions = 60 s at 50 segments/s). It only bites at extreme rates or with very long captions.
+- **Memory:** still a fixed bound, ~1.2 MB worst case. In the quick gate, RSS is unchanged (~33 MB).
+- **Tests:** 3 new in `tests/test_state.py`: 60 s recoverable at 50 segments/s; reply trimmed to its byte budget keeping the newest contiguous items; exact budget boundary. `pytest` 113 passed / 1 skipped (Windows and WSL2). `check.py` GATE PASSED (WSL2): t1–t4 + late 100% finals, 0 dup/stale.
+- **Not re-run:** the reference-VM tables in Day 4 part 2. The change only matters when history exceeds 2000 items, which no public test or Day 4 run reaches (5-min run plateaus at 120), so those numbers still hold.
 
-Claude suggestion I rejected: keeping the TCP-reset change. It was first reported as a fix from one good run; three more runs and an in-process test showed it only helps when the reset reaches the client before the test ends.
+## Update 2 Nov (2) — lihloway — hidden-variation matrix, two lag-policy fixes, Python 3.8
+
+All numbers in this section: **WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0%, 1 run each** (dev numbers, not the reference VM).
+
+### New tool: `hidden_sim.py` (13 scenarios for the three harder hidden components)
+
+See `TESTING.md` §4b. In short:
+- unmodified public clients, source and analyser;
+- `tc` on the test port only (rate, delay/jitter, loss, or a mix, optionally lifted mid-run);
+- before (plain FIFO) vs after (ours);
+- a **`due %`** column that excuses only finals sent in the last 3 s before the clients stop (the evaluator's "short bounded grace period"). On a shaped link the source's own handshake can be delayed 2–4 s, and its last finals then go out as the clients stop. That's an artifact of fixed-length runs, seen in both configs.
+
+### Results (finals **due** %, final code unless noted)
+
+| Scenario | Component | plain FIFO | ours (before the fixes) | **ours (final)** | Notes |
+|---|---|---:|---:|---:|---|
+| slow30: 30% slow @ 500 ms | adv1 | 85.8 | 100 | 100* | slow P95 10 s vs FIFO 29 s |
+| slow250: 10% @ 250 ms | adv1 | 100 | 100 | 100* | |
+| slow700: 10% @ 700 ms (just above the finals rate) | adv1 | 93.9 | **98.2** | **100** | fix 1 |
+| burst3x_slow: source 3×, readers @ 150 ms | adv1 | 95.9 | 100 | 100* | |
+| bw1m_250: 1 Mbit/s, 250 clients | adv2 | 100 | 100 | 100 | fresh finals 58% vs 0% |
+| bw2m_slow: 2 Mbit/s, 500 clients, 10% slow | adv2 | 95.4 | **99.78** | **99.96** | fix 2; see limitation |
+| bw2m_loss: 2 Mbit/s + 20 ms + 1% loss | adv2 | 100 | 100 | 100 | fresh finals 42% vs 0% |
+| bw2m_lifted: 2 Mbit/s for 30 s, then unlimited | adv2 | 100 | 100 | 100 | tail P95 36 ms: back to normal after the lift |
+| bw2m_reconnect: 2 Mbit/s, 20% drop + 20% late (60 s) | adv2 | 100 | 100 | 100 | ours less fresh here: P95 834 vs 267 ms |
+| mass_all: 100% reconnect at once | recon | 100 | 100 | 100* | recovery P95 8 ms |
+| mass_half_30s: 50% away 30 s | recon | 100 | 100 | 100* | |
+| outage_75s: 20% away 75 s | recon | 100 | 100 | 100* | resume gets all retained finals (90 s window) |
+| reconnect_loss: 20% drop on the T5 link | recon | 100 | 100 | 100* | |
+
+\* Not re-run after the fixes. Neither fix can act there: no client in those runs was lagging when it disconnected (fix 1), and none was in slow-link lag (fix 2). The quick gate (T3 included) passes on the final code.
+
+Duplicates and stale were 0 in every run, for both configs.
+
+### Fix 1: lag memory across reconnects (`LagMemory`, `liverecall/channel.py`)
+
+- **Problem (slow700):** a 700 ms reader is only just faster than the finals stream. Its pong stayed stuck behind its 16-message read-ahead for more than 10 s, so it was closed as hopeless. It reconnected, and `HISTORY` recovered everything correctly. But the new channel started in **full delivery**, refilled the read-ahead, and the last 15 finals were still unread when the run ended (98.0%).
+- **Fix:** a channel that closes while lagging records (cause, recovery wait) by client_id. It's bounded: 4096 entries, each kept 120 s, only int/str ids. A channel for the same client_id within that time **resumes lag mode at once**, counted as a relapse (doubled wait).
+- **Result:** slow700 → 100%. `[stats]` gains `lag_resumed_total`.
+
+### Fix 2: a slow reader on a slow link is reclassified (`_become_reader_lag`)
+
+- **Problem (bw2m_slow):** on a congested link every client's kernel RTT is high, so a slow *reader* there was classed as a slow *link*. Every ~10 s it was retried with the full stream, refilling its read-ahead, and finals were still stranded at the end.
+- **Fix:** congestion delays a pong by about one RTT, while a stalled reader holds it for its whole read-ahead (~8 s). So in slow-link lag, a pong pending more than `max(READER_PONG_S = 6 s, 4 × RTT)` reclassifies the client as a reader. It then gets the reader's ≥ 60 s wait. This only ever lengthens the wait.
+- **Result:** 99.78 → 99.96%. `[stats]` gains `reclassified_total`.
+
+**Remaining limitation:** about 13 of the ~50 slow readers are reclassified; the rest still lose their last 3–6 finals. That's 0.04% overall, above the 99% cap. A slow reader's finals arrive ~9 s late anyway (its library's read-ahead), so a retry in the last ~25 s strands a few. Lowering `READER_PONG_S` would catch more, at the risk of reclassifying merely congested clients.
+
+### No regression on Day 4's bandwidth test (A/B on the same machine)
+
+`bandwidth_test.py --apply --clients 500 --duration 60 --only after`, 2 runs each of old (`0323ec4`) and final code, interleaved:
+
+| | old 1 | old 2 | final 1 | final 2 |
+|---|---:|---:|---:|---:|
+| finals due % | 100 | 100 | 100 | 100 |
+| P50 / P95 ms | 602 / 1275 | 446 / 1359 | 461 / 1292 | 528 / 1356 |
+| fresh finals % | 46.4 | 55.2 | 56.8 | 50.0 |
+| coverage % | 56.8 | 56.3 | 56.4 | 57.0 |
+
+One earlier final-code run showed 97.4% *public* completeness. That was the late-source artifact: the source's first segment went out at 4.1 s, all 500 clients missed only the last 2 segments, and due was 100%.
+
+### Python 3.8 / websockets 13.1 (Ubuntu 20.04 grader insurance)
+
+- **Change:** `requirements.txt` has per-version lines:
+  - `websockets>=16,<17; python_version >= "3.10"`: unchanged guarantee on 3.10+.
+  - `websockets>=13.1,<16; python_version < "3.10"`: 13.1 on 3.8.
+  - **Why per-version, not one `>=13.1,<17` line:** pip doesn't upgrade a package that already satisfies the requirement. If the grader's environment already had websockets 13–15 (e.g. from the starter's `>=13,<17`), a loose line would leave it, and test clients sharing that environment would run the older client library. Verified: a Python 3.12 environment with websockets 15.0.1 is upgraded to 16.1.1 by `pip install -r requirements.txt`, and a fresh 3.8 install resolves to 13.1.
+- Code changes:
+  - removed `@dataclass(slots=True)`;
+  - the server imports `websockets.asyncio.server.serve` explicitly;
+  - `ClientChannel` creates its asyncio Event lazily (3.8 binds an Event to the loop at construction).
+- **Tests:** `pytest` passes on Python 3.8.20 + websockets 13.1 and on 3.12 + 16.1.1 (136 passed, 1 skipped). Under 3.8, `check.py` passes T1, T2, T4 and late join.
+- **Limitation:** under 3.8, **T3 is 95.5% (plain FIFO 95.1%)**. websockets 13.1's *client* reads ahead 32 messages + 64 KiB before it stops answering pings (16 messages on 16.x), so lag is detected too late and finals are stranded. The server can't change the client's buffer. So: if the grader's own clients run on websockets 13.x, our slow-reader advantage disappears, but nothing gets worse than a plain queue.
+
+### Numbers today (WSL2, quick gate, 1 run)
+
+```
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients):  P50 11.6 ms, P95 23.8 ms, P99 31.4 ms, completeness 100%
+- T3 (10% slow):     completeness 100%, coverage 95.1%, P95 793 ms (all clients)
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, recovery P95 5.6 ms
+```
+
+### Next person should start with
+
+Re-run the reference tables on the reference VM with the final code (`check.py --full --runs 3`, `bandwidth_test.py --apply ... --runs 3`, `hidden_sim.py --runs 3`). Two items are open for the report: the `bw2m_slow` residual, and the Python 3.8 T3 limitation.
+
+Claude suggestion I rejected: batching finals into a mid-stream `HISTORY` message for lagging clients. The teaching team ruled out unsolicited HISTORY on 2 Nov.
+
+## Update 2 Nov (3) — lihloway — large HISTORY on a shaped link (fix), high-latency links, grace margin
+
+WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0–1%, 1 run each unless stated (dev numbers).
+
+### Fix: cap TCP segment size at 1400 B (`MAX_SEGMENT`, `listening_socket()` in `solution_server.py`)
+
+**What failed:**
+- **Symptom:** `bw2m_late_long` (2 Mbit/s, 300 clients, non-repeating text, 20% join at 70 s asking 60 s) scored **80%** finals. The 60 late joiners made 103 connection attempts and received **zero** HISTORY messages and zero captions; 32 hopeless closes.
+- **Cause:** loopback's MTU is 64 KiB, so a large HISTORY reply leaves as **one** TCP segment. The public bandwidth profile's tbf (`burst 32kbit` = 4000 B) drops any packet bigger than its burst, every retransmit too, so the connection stalls for good. Day 3 saw the same with a 2 MB transfer.
+- **Why it matters:** the public transcript repeats 10 sentences, so permessage-deflate hid this. Real lecture text doesn't compress like that.
+
+**Direct probe** (2 Mbit/s tbf on the port, 40 incompressible finals, one client joins asking 60 s):
+
+| server | HISTORY (20.8 KB) |
+|---|---|
+| cap off | **never arrives** (stalled > 15 s) |
+| cap on | arrives in **0.04 s** |
+
+**Fix:**
+- The server builds its own listening socket with `TCP_MAXSEG = 1400` before `listen()`, and hands it to `serve(sock=...)`.
+- `ss -tni` shows mss 1388 on both ends (1400 minus TCP timestamp options).
+- On a real Ethernet path this is roughly the MSS anyway, so it only changes loopback behaviour.
+- Works on websockets 13.1 and 16. Where the option is unsupported (some Windows versions) it's skipped.
+
+**Cost:** none measurable. `bandwidth_test.py --apply --clients 500 --duration 60`, 3 runs each, interleaved:
+
+| | cap off | cap on |
+|---|---|---|
+| finals due % | 100 / 100 / 100 | 100 / 100 / 100 |
+| P50 ms | 692 / 646 / 634 | 657 / 617 / 617 |
+| P95 ms | 1074 / 1044 / 1068 | 1072 / 1075 / 1073 |
+| fresh finals % | 23.0 / 39.2 / 41.9 | 29.9 / 43.5 / 41.0 |
+| coverage % | 77.5 / 74.5 / 72.1 | 77.1 / 72.5 / 73.2 |
+
+Test: `test_listening_socket_caps_segment_size` (runs on Linux, skipped where the option can't be read).
+
+### New `hidden_sim.py` scenarios (18 in total now; component `delay` added)
+
+Tool fixes:
+- shaping is applied after the server listens (`run_demo.wait_for_port` gives each connect 0.25 s, which a 600 ms RTT never meets);
+- late joins in the large-HISTORY scenarios happen at 55 s, so 60 s of history can cover everything. At 70 s the first 10 s are unrecoverable by design, and the public analyser counts them as lost.
+
+| Scenario | FIFO due % | ours due % | Notes |
+|---|---:|---:|---|
+| late_long_text: unique text, 20% drop at 70 s, 20% join at 55 s (60 s) | 100 | 100 | recovery P95 6 ms |
+| bw2m_late_long: same on 2 Mbit/s, 300 clients | 100 | 100 | at 55 s the reply happened to stay under 4000 B even without the cap (A/B passed); the probe above is the deterministic test |
+| delay300: 300 ± 100 ms each way | 100 | 100 | **coverage 40.5% vs 99.9%**; P95 1345 vs 1429 ms |
+| delay300_loss: + 3% loss | 100 | 100 | **coverage 38.6% vs 98.9%**; P95 2452 vs 2446 ms |
+| delay300_slow: + 10% slow readers | 95.5 | **100** | coverage 40.8% vs 94.7%; slow P95 9.1 s vs 29.2 s |
+
+### Known trade-off: false "slow link" lag on high-latency, high-jitter links
+
+On `delay300*` every client was classified as a slow link (154–182 lag entries per 60 s, 0 as reader).
+- The kernel RTT (~600 ms) is above `LINK_RTT_S`.
+- netem's ±100 ms jitter reorders packets, so retransmits occasionally hold a pong past `LAG_S = 1 s`.
+- Day 4's relapse rule then re-enters lag at the next late pong. Clients spend most of the run finals-only.
+
+**Cost:** coverage (~40% vs ~99%). Not finals (100%), and not freshness (P95 equal or better).
+
+**Not fixed, deliberately:** any rule that tolerates late pongs on high-RTT links would also slow congestion detection on the 2 Mbit/s test (adv2, 6 marks), and retuning means re-measuring T3, T5, bandwidth and convergence. The public T5 profile (120 ± 30 ms) is unaffected (Day 4: coverage 99.93%). For the report: limitation + future work (e.g. judge lateness relative to the RTT, or detect congestion from TCP_INFO queue growth).
+
+### Grace-period margin (re-analysis of every saved hidden_sim run)
+
+"Finals due" recomputed with 0 / 1 / 2 / 3 s grace:
+- **Final code, 0 s grace:** 100% everywhere except `bw2m_slow` 99.84 and `bw2m_loss` 99.99. With 1 s grace, `bw2m_loss` reaches 100.
+- **Plain FIFO:** below 100 in 5 scenarios at every grace value (85–99.7%).
+
+So our completeness doesn't depend on the evaluator's grace period being generous.
+
+### Numbers today (WSL2, quick gate, final code, 1 run)
+
+```
+- T1 (20 clients):   dup 0, stale 0, completeness 100%, coverage 100%
+- T2 (100 clients):  P50 7.3 ms, P95 20.6 ms, P99 27.3 ms, completeness 100%
+- T3 (10% slow):     completeness 100%, coverage 95.1%, P95 799 ms (all clients)
+- T4 (20% drop 5s):  dup 0, stale 0, completeness 100%, recovery P95 3.0 ms
+```
+
+### Next person should start with
+
+Re-run on the reference VM with the final code: `check.py --full --runs 3`, `bandwidth_test.py --apply --clients 500 --duration 60 --runs 3`, `hidden_sim.py --runs 3`.
+
+Report items:
+- the HISTORY stall and the MSS cap (a good "experiment that surprised us");
+- the high-latency coverage trade-off;
+- the Python 3.8 note.
+
+## Update 3 Nov — lihloway — full hidden_sim matrix (25 scenarios, median of 3) + new tooling
+
+**Environment:** WSL2 Ubuntu 24.04, Python 3.12, websockets 16.1.1, timer drift +0%, final code (`ad97b53`). Dev numbers, not the reference VM.
+
+**Command:** `python hidden_sim.py --runs 3 --before-runs 1` (our server ×3, plain FIFO ×1; ~2 h). Raw output: `results/hidden_final_*`, summary `results/hidden_final_summary.json` (gitignored).
+
+**New tooling (this update):**
+- `custom_source.py`: a test-only source, same protocol, with N revisions per segment and periodic bursts.
+- Flapping clients: the harness's `websockets.connect` is wrapped for chosen clients and aborted every ~N s. The unmodified public client reconnects with its own resume state.
+- More than 500 clients: load split over worker processes with one shared start time; CSVs merged.
+- `--before-runs`. Tests in `tests/test_hidden_sim.py` (18).
+
+### Result: our server reaches 100% of due finals in all 3 runs of 24 of 25 scenarios. The exception is `bw2m_slow` (99.96–99.99%).
+
+The plain FIFO falls short in 7 scenarios.
+
+| Scenario | Component | FIFO due % | **ours due %** (3/3 runs) | Ours vs FIFO, other metrics (median) |
+|---|---|---:|---:|---|
+| slow30 | adv1 | 86.7 | **100** | slow P95 9.6 s vs 29.7 s |
+| slow250 | adv1 | 100 | **100** | same |
+| slow700 | adv1 | 93.9 | **100** | 10 hopeless closes, recovered via HISTORY + lag memory |
+| revs8_slow (8 revisions/segment) | adv1 | 92.8 | **100** | slow P95 10.6 s vs 43.8 s |
+| bursty_slow (8× bursts) | adv1 | 100 | **100** | both close the slow readers during bursts |
+| burst3x_slow | adv1 | 96.4 | **100** | P95 5 ms vs 4.2 s |
+| bw1m_250 | adv2 | 100 | **100** | fresh finals 43% vs 19%; coverage 73% vs 96% |
+| bw2m_revs8 | adv2 | 100 | **100** | **FIFO fresher** (fresh finals 93% vs 54%, P95 486 vs 658 ms) |
+| bw2m_slow | adv2 | 95.8 | **99.97** (99.96–99.99) | known residual; above the 99% cap |
+| bw2m_loss | adv2 | 100 | **100** | fresh finals 55% vs 18%; coverage 69% vs 99% |
+| bw2m_lifted | adv2 | 100 | **100** | tail P95 35 ms (converged after the lift) |
+| bw2m_reconnect | adv2 | 100 | **100** | **FIFO fresher** (P95 198 vs 470 ms) |
+| bw2m_late_long (large HISTORY) | adv2 | 100 | **100** | FIFO fresher (P95 305 vs 502 ms) |
+| mass_all, mass_half_30s, outage_75s | recon | 100 | **100** | identical; recovery P95 14–17 ms |
+| reconnect_loss | recon | 100 | **100** | P95 1020 vs 1046 ms |
+| flap (20% drop every ~8 s) | recon | 100 | **100** | identical |
+| flap_slow (slow readers flapping) | recon | 100 | **100** | P95 6 ms vs 489 ms; slow P95 7.5 s vs 9.2 s |
+| late_long_text | recon | 100 | **100** | identical |
+| delay300 / delay300_loss | delay | 100 | **100** | coverage ~40% vs ~99% (known false link-lag) |
+| delay300_slow | delay | 95.7 | **100** | slow P95 10.7 s vs 29.9 s |
+| scale1000 | scale | 100 | **100** | P95 53 vs 36 ms (ping overhead) |
+| scale1500_slow | scale | 95.8 | **100** | slow P95 9.8 s vs 20.5 s |
+
+Duplicates and stale were 0 in all 100 runs.
+
+### What this says (for the report)
+
+- **Completeness is where the design pays off.** Ours is 100% (99.97% worst case) wherever readers can keep up with finals; a plain queue loses 4–14% of finals for slow readers. This is the correctness gate (< 99% caps hidden D).
+- **Weak spot: freshness when the link is *nearly* sufficient.** At 300 clients on 2 Mbit/s (`bw2m_revs8`, `bw2m_reconnect`, `bw2m_late_long`) the plain stream fits the link. Our ~1 ping/s per client plus pongs pushes it into congestion, and the lag policy then goes finals-only, so the FIFO is fresher there. (Day 3 found the same before the ping budget; the budget reduced the effect but didn't remove it.) At 500 clients, where the stream genuinely doesn't fit, ours is clearly better.
+- **Coverage is the price everywhere a link looks slow:** ~70% on 2 Mbit/s, ~40% on high-latency jittery links. Coverage is graded under "normal" conditions only, so this is a deliberate trade, not a correctness issue.
+- **Possible future work:** ping only clients that show signs of lag (e.g. kernel `tcpi_notsent_bytes` > 0 or a growing RTT) instead of every client every second. That would remove most of the overhead where the stream fits.
+
+### Next person should start with
+
+The report. These are dev numbers. If any go in the report, label them "WSL2, median of 3"; otherwise re-run `hidden_sim.py --runs 3` on the reference VM.

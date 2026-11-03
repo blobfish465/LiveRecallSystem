@@ -27,7 +27,16 @@ from typing import Any, Callable, Iterable
 # reconnecting client whose gap straddles the 60 s edge still gets everything.
 DEFAULT_HISTORY_WINDOW_S = 90.0
 # Hard cap independent of time, in case the source bursts many tiny segments.
-DEFAULT_HISTORY_MAX_ITEMS = 2000
+# Caption rate is a hidden-test variable and 60 s of recovery is required, so
+# the cap must hold 60 s even at high rates: 6000 covers 60 s up to 100
+# segments/s (75x the public source). At ~200 B per caption that is ~1.2 MB,
+# still a fixed bound.
+DEFAULT_HISTORY_MAX_ITEMS = 6000
+# Upper bound on one serialized HISTORY reply. websockets clients (including
+# the public load_clients.py) refuse messages over 1 MiB (max_size=2**20) and
+# would drop the connection, so a large window is trimmed to its newest items.
+# 768 KiB holds ~3900 typical captions: a full 60 s at 50 segments/s.
+DEFAULT_HISTORY_MAX_BYTES = 768 * 1024
 # Clients may ask for at most this much context on a fresh (late) join.
 MAX_HISTORY_SECONDS = 60.0
 DEFAULT_HISTORY_SECONDS = 30.0
@@ -105,9 +114,11 @@ class CaptionState:
         history_max_items: int = DEFAULT_HISTORY_MAX_ITEMS,
         max_active: int = DEFAULT_MAX_ACTIVE,
         clock: Callable[[], float] = time.time,
+        history_max_bytes: int = DEFAULT_HISTORY_MAX_BYTES,
     ) -> None:
         self.history_window_s = history_window_s
         self.history_max_items = history_max_items
+        self.history_max_bytes = history_max_bytes
         self.max_active = max_active
         self._clock = clock
         # Latest provisional revision of each not-yet-final segment.
@@ -187,6 +198,9 @@ class CaptionState:
           so a client that was away slightly longer than history_seconds still
           ends up complete. This is bounded by the server's history window, so
           it never replays the whole lecture.
+        * The serialized reply stays within `history_max_bytes`: if the window
+          is larger, its oldest items are left out (only reachable at extreme
+          caption rates or with very long captions).
         """
         now = self._clock()
         self._prune(now)
@@ -204,7 +218,7 @@ class CaptionState:
                  or (c.segment == last_segment and c.revision > last_revision))
         ]
         items.sort(key=lambda c: c.segment)
-        return items
+        return _newest_within(items, self.history_max_bytes)
 
     # -------------------------------------------------------------- inspect
     @property
@@ -224,6 +238,25 @@ def _clamp_history_seconds(value: Any) -> float:
     if secs is None or secs < 0:
         return DEFAULT_HISTORY_SECONDS
     return min(secs, MAX_HISTORY_SECONDS)
+
+
+_HISTORY_ENVELOPE = len('{"type":"HISTORY","items":[]}')
+
+
+def _newest_within(items: list[Caption], max_bytes: int) -> list[Caption]:
+    """Longest suffix of `items` whose history_message() fits in max_bytes.
+
+    `wire` is ASCII (json.dumps escapes non-ASCII), so len() is the byte size.
+    """
+    size = _HISTORY_ENVELOPE
+    start = len(items)
+    while start > 0:
+        extra = len(items[start - 1].wire) + (1 if start < len(items) else 0)
+        if size + extra > max_bytes:
+            break
+        size += extra
+        start -= 1
+    return items[start:]
 
 
 def history_message(items: Iterable[Caption]) -> str:

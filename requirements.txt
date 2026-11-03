@@ -1,4 +1,11 @@
 # Mandatory deterministic path only.
-# Pinned to 16.x: lag detection relies on this version's client read-ahead
-# (stops reading, pings included, at 16 queued frames); measured on 16.1.1.
-websockets>=16,<17
+# Python 3.10+: websockets 16.x, on which the lag policy was designed and measured
+# (its client reads ahead 16 frames). A strict lower bound also makes pip *upgrade*
+# an older websockets already installed in a shared environment, so test clients
+# there get the same library.
+websockets>=16,<17; python_version >= "3.10"
+# Python 3.8/3.9 (e.g. Ubuntu 20.04): the newest websockets those support, so the
+# server still installs and starts (the starter itself allows >=13). Our server
+# imports the asyncio implementation explicitly, which 13.1 already ships. See
+# HANDOFF.md "Update 2 Nov (2)" for how slow readers behave with 13.x clients.
+websockets>=13.1,<16; python_version < "3.10"

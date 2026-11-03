@@ -25,6 +25,7 @@ import websockets
 from websockets.sync.client import connect as ws_connect
 
 import solution_server
+from liverecall.channel import LagMemory
 from liverecall.state import CaptionState
 
 selenium = pytest.importorskip("selenium")
@@ -112,7 +113,8 @@ def fresh_server_state(monkeypatch):
     """Each test starts from an empty server, like tests/test_server.py."""
     monkeypatch.setattr(solution_server, "STATE", CaptionState())
     monkeypatch.setattr(solution_server, "CLOSED_TOTALS",
-                        {"coalesced": 0, "lag_entries": 0, "hopeless_closes": 0})
+                        {key: 0 for key in solution_server.CLOSED_TOTALS})
+    monkeypatch.setattr(solution_server, "LAG_MEMORY", LagMemory())
     solution_server.CHANNELS.clear()
     yield
     solution_server.CHANNELS.clear()
@@ -160,7 +162,8 @@ def rows(driver):
     return driver.execute_script("""
         return [...document.querySelectorAll('#live .caption')].map(r => ({
             segment: Number(r.dataset.segment), revision: Number(r.dataset.revision),
-            final: r.classList.contains('final'), text: r.querySelector('.text').textContent}));
+            final: r.classList.contains('final'), text: r.querySelector('.text').textContent,
+            badge: r.querySelector('.badge').textContent}));
     """)
 
 
@@ -201,8 +204,9 @@ def test_revisions_replace_in_place(driver, http_port, server, source):
     wait_until(driver, has_row(2, 1))
 
     assert rows(driver) == [
-        {"segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements."},
-        {"segment": 2, "revision": 1, "final": False, "text": "Retransmission"},
+        {"segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements.",
+         "badge": "✓ final"},
+        {"segment": 2, "revision": 1, "final": False, "text": "Retransmission", "badge": "… provisional"},
     ]
 
     # A stale revision must not change what is shown; a marker message tells us it was processed.
@@ -210,7 +214,8 @@ def test_revisions_replace_in_place(driver, http_port, server, source):
     source.send(2, 2, "Retransmission timers", False)
     wait_until(driver, has_row(2, 2))
     assert rows(driver)[0] == {
-        "segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements."}
+        "segment": 1, "revision": 3, "final": True, "text": "TCP uses cumulative acknowledgements.",
+        "badge": "✓ final"}
     assert len(rows(driver)) == 2
     # The server rejected the stale message, so the page never saw it.
     assert counters(driver)["stale"] == 0
@@ -261,6 +266,12 @@ def test_recall_uses_local_state_only(driver, http_port, server, source):
     assert recall_items(driver) == [12]
     click(driver, "button[data-seconds='60']")
     assert recall_items(driver) == [10, 11, 12]
+    # Each line says how long ago it was said, on the lecture clock (newest = "0 s ago").
+    ages = driver.execute_script("return [...document.querySelectorAll('#recall .age')].map(a => a.textContent)")
+    assert ages == ["50 s ago", "22 s ago", "0 s ago"]
+    click(driver, "#recall-hide")                    # the panel can be closed again
+    assert recall_items(driver) == []
+    assert "nothing is requested from the server" in driver.find_element("id", "recall-title").text
     # Local only: still the one connection, and the server received exactly one CLIENT_HELLO.
     assert counters(driver)["connections"] == 1
     assert len(solution_server.CHANNELS) == 1
@@ -299,6 +310,10 @@ def test_reconnect_recovers_missed_finals_exactly_once(driver, http_port, server
     assert all(r["final"] for r in rows(driver))
     assert rows(driver)[3]["text"] == "segment 4 final"
     assert status_state(driver) == "connected"
+    # The status line says what the reconnect recovered, so the demo shows it on screen.
+    status = driver.find_element("id", "status").text
+    assert "resumed after segment 3" in status and "recovered 2 missed captions (segments 4–5)" in status
+    assert "0 duplicates" in status
 
 
 def test_late_join_gets_context_then_live_in_two_tabs(driver, http_port, server, source):
@@ -319,7 +334,8 @@ def test_late_join_gets_context_then_live_in_two_tabs(driver, http_port, server,
     wait_until(driver, has_row(3))
     source.send(4, 1, "segment 4 draft", False)      # ...then live updates reach both tabs
     wait_until(driver, has_row(4, 1))
-    assert rows(driver)[-1] == {"segment": 4, "revision": 1, "final": False, "text": "segment 4 draft"}
+    assert rows(driver)[-1] == {"segment": 4, "revision": 1, "final": False, "text": "segment 4 draft",
+                                "badge": "… provisional"}
     second_id = driver.execute_script("return sessionStorage.getItem('liverecall-client-id')")
     driver.close()
 
