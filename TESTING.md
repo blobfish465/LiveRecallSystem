@@ -13,14 +13,27 @@ pip install -r requirements-dev.txt
 ## 1. Unit + in-process integration tests (seconds)
 
 ```bash
-python -m pytest -q
+python -m pytest -q          # ~15 s; 150 tests (144 + 6 browser tests, skipped without Firefox)
 ```
 
-| File | Covers |
-|---|---|
-| `tests/test_state.py` | revision rules, final durability, malformed/unknown fields, variable revision counts (1/2/3/8), history bounded by time + count, evicted-segment rejection, active-segment cap, 1-hour boundedness, HISTORY selection (fresh vs resume, 60 s clamp, ordering, finals only) |
-| `tests/test_channel.py` | control-first ordering, full delivery when not lagging, opt-in coalescing (in place, finals/control never replaced), lag detection by late pong (finals/control only, sent without waiting for pongs), ping budget, lag cause from kernel RTT (slow link vs slow reader) and its recovery wait, recovery jitter bounds, compaction on lag entry (no provisional after its final), recovery after fast pongs + backoff on relapse (never below the cause's base), hopeless cap (age + count + unanswered ping, not on a slow link) closes, send/pong failure, offer() never blocks |
-| `tests/test_server.py` | real WebSockets in-process: late join HISTORY→live, resume sends only missed finals, 30 clients joining during a burst see every final exactly once (atomic snapshot+register), source garbage/unknown types/SOURCE_DONE ignored, bad hello → 1008, abrupt client drop doesn't affect others |
+| File | Tests | Covers |
+|---|---:|---|
+| `tests/test_state.py` | 32 | revision rules, final durability, malformed/unknown fields, variable revision counts (1/2/3/8), history bounded by time + count, evicted-segment rejection, active-segment cap, 1-hour boundedness, HISTORY selection (fresh vs resume, 60 s clamp, ordering, finals only), 60 s at 50 segments/s, the 768 KiB reply cap (newest kept, exact boundary) |
+| `tests/test_channel.py` | 52 | control-first ordering, full delivery when not lagging, opt-in coalescing (in place, finals/control never replaced), lag detection by late pong (finals/control only, sent without waiting for pongs), ping budget, lag cause from kernel RTT (slow link vs slow reader) and its recovery wait, recovery jitter bounds, compaction on lag entry (no provisional after its final), recovery after fast pongs + backoff on relapse (never below the cause's base), hopeless cap (age + count + unanswered ping, not on a slow link) closes, send/pong failure, offer() never blocks, `LagMemory` (bounded, expiring, per client; a lagging client resumes lag mode on reconnect), slow-link lag reclassified as reader lag when a pong is stuck |
+| `tests/test_server.py` | 10 | real WebSockets in-process: late join HISTORY→live, resume sends only missed finals, 30 clients joining during a burst see every final exactly once (atomic snapshot+register), source garbage/unknown types/SOURCE_DONE ignored, bad hello → 1008, abrupt client drop doesn't affect others, `[stats]` totals survive disconnects, listening socket caps TCP segments at 1400 B (Linux; skipped where the option can't be read) |
+| `tests/test_client.py` | 6 | browser e2e in headless Firefox (see §5); skipped where Firefox/geckodriver are missing |
+| `tests/test_check.py` | 15 | `check.py`: server-log parsing, `[stats]` peaks, gate rules |
+| `tests/test_bandwidth_tool.py` | 5 | `bandwidth_test.py`: tc output parsing, link-rate maths |
+| `tests/test_convergence_tool.py` | 12 | `convergence_test.py`: metric definitions |
+| `tests/test_hidden_sim.py` | 18 | `hidden_sim.py` / `custom_source.py`: scenario bounds, roles, flappers, source selection, flap wrapper, CSV merging, tc chain, metrics, revisions/bursts |
+
+**Python 3.8 check** (the server must also run on Ubuntu 20.04; see `CLAUDE.md`, "Hard constraints"). Before pushing server changes:
+
+```bash
+uv python install 3.8       # then create venv38 from that interpreter
+venv38/bin/python -m pip install -r requirements.txt "pytest<8.4"     # Windows: venv38\Scripts\python
+venv38/bin/python -m pytest -q
+```
 
 ## 2. Regression gate on the public harness (minutes)
 
@@ -62,10 +75,12 @@ latency 400ms`, see the script's docstring for why not `bandwidth_2mbit.sh` as i
 see: link Mbit/s from `/proc/net/dev`, tbf drops from `tc -s qdisc`, the server's `[stats]` peaks (lagging clients,
 coalesced provisionals, hopeless closes, `max_pending`) and its RSS. Files: `results/bandwidth_*` (gitignored).
 Pick the client count from the demand run: 100 clients need ~0.6 Mbit/s and never saturate the 2 Mbit/s link;
-**500 clients** put both configurations over it (plain FIFO ~2.9 Mbit/s, lag-aware ~5.4 Mbit/s, because it pings
-after every send). There is no pass/fail gate: the numbers go into `HANDOFF.md` and the report's before/after
-comparison. `tests/test_bandwidth_tool.py` covers the tc parsing and the rate maths; `tests/test_check.py` the server-log parsing and the gate rules shared with `check.py`. The policy fix this experiment calls for is handed to Day 4 (`HANDOFF.md`, Day 3). Always check `tc qdisc show dev lo`
-prints `noqueue` afterwards; `sudo ./network_profiles/reset.sh lo` if not.
+**500 clients** put both configurations over it (plain FIFO ~2.9 Mbit/s; Day 3's lag-aware code ~5.4 Mbit/s because
+it pinged after every send, which Day 4's ping budget removed). There is no pass/fail gate: the numbers go into
+`HANDOFF.md` and the report's before/after comparison. `tests/test_bandwidth_tool.py` covers the tc parsing and the
+rate maths; `tests/test_check.py` the server-log parsing and the gate rules shared with `check.py`. The policy fix
+this experiment called for was done on Day 4 (`HANDOFF.md`, Day 4 parts 1–2): final code 100% vs FIFO ~98% finals.
+Always check `tc qdisc show dev lo` prints `noqueue` afterwards; `sudo ./network_profiles/reset.sh lo` if not.
 
 ## 4. Slow-then-fast convergence (Day 3; any OS, no root)
 
@@ -118,6 +133,13 @@ How it runs:
 - An "after" run fails on due < 100% or any dup/stale/non-final HISTORY item. Connection errors are reported, not failed.
 - `tests/test_hidden_sim.py` covers the scenario bounds, roles, flappers, source selection, the flap wrapper, CSV merging, the tc chain, the metrics and `custom_source.py`'s revisions/bursts.
 
+**Latest results** (3 Nov, WSL2, `--runs 3 --before-runs 1`, final code):
+- **Ours:** 100% of due finals in all 3 runs of 24 of the 25 scenarios; `bw2m_slow` 99.96–99.99%. 0 duplicates/stale in all 100 runs.
+- **Plain FIFO:** falls short in 7 scenarios (86.7–96.4%).
+- Full table and trade-offs in `HANDOFF.md` "Update 3 Nov"; known limitations in `CLAUDE.md`.
+
+**Large-HISTORY stall probe** (the bug behind the TCP segment cap): a 20.8 KB incompressible HISTORY through the 2 Mbit/s tbf never arrives with the cap off, and arrives in 0.04 s with it. It's not a committed script; its setup (2 Mbit/s tbf on the port, 40 incompressible finals, one client joining with `history_seconds: 60`) and results are in `HANDOFF.md` "Update 2 Nov (3)". `test_listening_socket_caps_segment_size` guards the fix itself.
+
 ## 5. Manual checklist (browser, Day 3)
 
 Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
@@ -143,4 +165,7 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 - [x] Day 3: `check.py --stress` (section 2; medians in `HANDOFF.md`)
 - [x] Day 3: slow-then-fast convergence client (section 4)
 - [x] Day 4: bandwidth policy fix + re-run section 3 (cloud container, median of 3; re-run on the reference VM)
-- [ ] Day 4: T5 tc/netem x3; 5-minute memory run with `monitor_server.py`
+- [x] Day 4: T5 tc/netem ×3 (all 4 profiles) and the 5-minute memory run with `monitor_server.py` (reference VM, `HANDOFF.md` Day 4 part 2)
+- [x] 2–3 Nov: Python 3.8 test run; `hidden_sim.py` (25 scenarios, median of 3); unit tests for the history byte cap, `LagMemory`, reader reclassification and the TCP segment cap
+- [ ] Final code on the reference VM: T3 before/after ×3 (Frankfurters, task 6 in `CLAUDE.md`)
+- [ ] Manual browser checklist (§5), incl. a browser on another host, before recording the demo video (QiAn)

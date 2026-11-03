@@ -10,19 +10,22 @@ The server must fan this out to many clients **correctly** (no stale/duplicate f
 with **bounded** memory, while clients are slow, disconnect, join late, or sit on impaired/low-bandwidth links.
 
 - Deadline: **4 Nov 2026**. Demo + individual viva: **6 Nov 2026** (15-min slot, book on the SharePoint sheet).
-- Spec: `miniProject_Assignment4_LiveRecall_System.pdf` (course site). Starter docs: `START_HERE.md`, `PROTOCOL_EXAMPLES.md`, `NETWORKING_PRIMER.md`, `PUBLIC_TESTS.md`.
+- Spec: `miniProject_Assignment4_LiveRecall_System.pdf` (course site). **Version 2 (2 Nov)** rewrites requirements 8 (bounded history) and 11 (graceful overload) with the teaching team's clarifications; nothing else changed. Starter docs: `START_HERE.md`, `PROTOCOL_EXAMPLES.md`, `NETWORKING_PRIMER.md`, `PUBLIC_TESTS.md`.
 
 ## Code map
 
 | Path | What |
 |---|---|
-| `solution_server.py` | Entry point + WebSocket wiring only (source handler, client handler, `[stats]` line every 10 s) |
-| `liverecall/state.py` | `CaptionState`: revision rules, bounded history, `history_for()` → HISTORY selection. Pure logic, no I/O |
-| `liverecall/channel.py` | `ClientChannel`: per-client bounded queue + sender task. **Backpressure/overload policy goes here** |
-| `tests/` | pytest: `test_state.py`, `test_channel.py`, `test_server.py` (real sockets, in-process) |
+| `solution_server.py` | Entry point + WebSocket wiring (source handler, client handler, `[stats]` line every 10 s) and the transport settings: listening socket with `TCP_MAXSEG = 1400`, small per-client send buffers, kernel TCP RTT for lag classification |
+| `liverecall/state.py` | `CaptionState`: revision rules, bounded history, `history_for()` → HISTORY selection (incl. the 768 KiB reply cap). Pure logic, no I/O |
+| `liverecall/channel.py` | `ClientChannel`: per-client bounded queue + sender task, and `LagMemory`. **Backpressure/overload policy goes here** |
+| `client/` | Browser client: `store.js` (caption state, same rules as the server), `app.js` (connection, rendering, recall, reconnect), `index.html` |
+| `tests/` | pytest, 150 tests (see `TESTING.md`): state, channel, server (real sockets, in-process), browser (headless Firefox; skipped without it), and our tools |
 | `check.py` | Regression gate: runs unmodified `run_demo.py` scenarios, fails on completeness < 100% / dup / stale; prints timer drift first; `--stress` = 300/500-client scenarios; every row also shows the server's RSS + `[stats]` peaks |
 | `bandwidth_test.py` | Constrained-bandwidth experiment (needs `sudo tc`): before/after on a shaped loopback port, link + tbf + `[stats]` + RSS evidence |
 | `convergence_test.py` | Slow-then-fast clients (instructor's client code, imported): how fast freshness and full delivery return after a reader stops being slow, before/after |
+| `hidden_sim.py` | 25 hidden-variation scenarios (slow readers, bandwidth, reconnect/flapping, high latency, 1000–1500 clients) on the unmodified client code, before/after; `custom_source.py` is its test-only source for more revisions and bursts |
+| `report/` | `results.md` (experiments draft), `figures/` (Figures 1–6), `data/` (curated reference-VM results), `make_charts.py`, `build_data.py` |
 | `HANDOFF.md` / `TESTING.md` | Latest state + numbers / what's tested and how |
 | `results/` | Harness output (gitignored) |
 
@@ -31,7 +34,7 @@ with **bounded** memory, while clients are slow, disconnect, join late, or sit o
 ```bash
 python3 -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest -q          # ~1 s
+python -m pytest -q          # ~15 s
 python check.py              # ~3 min; must print "GATE PASSED" and timer drift < 10%
 ```
 
@@ -64,7 +67,7 @@ python check.py              # ~3 min; must print "GATE PASSED" and timer drift 
 
 ## Teaching-team clarifications (Prof. Anand, 2 Nov 2026; also on Canvas)
 
-Answers to our questions about the hidden tests. Exact parameters stay hidden; this is the intended behaviour. **Treat these as part of the spec.**
+Answers to our questions about the hidden tests. Exact parameters stay hidden; this is the intended behaviour. **Treat these as part of the spec.** The last two bullets are now in the spec itself (Version 2, requirements 8 and 11); the first four are only on the forum/Canvas, so cite them as the 2 Nov clarification.
 
 - **Slow readers:** no client will be made *permanently* too slow to keep up with the **final-caption stream alone**. The challenge is clients that can't keep up with the full stream of *provisional* revisions, while finals and the latest useful state are preserved.
 - **Final completeness:** measured after a **short, bounded** grace period for in-flight/recovery traffic. Don't rely on a long grace period or on an unbounded queue that only drains after the source stops.
@@ -75,11 +78,19 @@ Answers to our questions about the hidden tests. Exact parameters stay hidden; t
 
 How our design maps onto this:
 - finals-only + coalescing while lagging (slow reader or slow link);
-- per-client queue capped (64 entries, 10 s age);
-- hopeless clients closed and recovered via HISTORY *after a new `CLIENT_HELLO`*, which is allowed;
-- history bounded by 90 s **and** 6000 items, which holds 60 s up to ~100 segments/s.
+- per-client state capped: queue 64 entries / 10 s age; `LagMemory` 4096 entries / 120 s each;
+- hopeless clients closed and recovered via HISTORY *after a new `CLIENT_HELLO`*, which is allowed: the server never sends HISTORY on its own, and requirement 8 (v2) says clients beyond the window aren't guaranteed recovery. Describe it in the report as a bounded-state safety valve. It fires only for readers at or near the finals rate and during 8× bursts, never in T3, bandwidth or stress;
+- history bounded by 90 s **and** 6000 items; each HISTORY reply capped at 768 KiB, so a full 60 s reply fits up to ~65 finals/s.
 
-Known residual risk: Day 4's end-of-run tail. A slow reader that retries full delivery in the last ~10–25 s may not drain before a *short* grace period ends; 99.87% in the 5-min run. See `HANDOFF.md`.
+## Known limitations (state them in the report)
+
+- **End-of-run tail:** a slow reader that retries full delivery in the last ~10–25 s may not drain before a *short* grace period ends: 99.87% in Day 4's 5-min run.
+- **`bw2m_slow`:** 2 Mbit/s with 10% slow readers reaches 99.96–99.99% of due finals (`hidden_sim`, median of 3), above the 99% cap.
+- **High-latency, jittery links:** at 300 ± 100 ms each way, clients are misclassified as "slow link". Coverage ~40% (FIFO ~99%); finals 100%, P95 no worse. Coverage is graded only under normal conditions. Not fixed, because the obvious fixes slow congestion detection on the bandwidth test.
+- **A link that *almost* fits (~300 clients on 2 Mbit/s):** our ~1 ping/s per client tips it into congestion, so the plain FIFO is fresher there (P95 ~200–490 ms vs ~470–660 ms). Finals 100% for both.
+- **Slow-reader latency floor ~9–10 s:** the client library's 16-message read-ahead, which the server can't see or drain.
+- **websockets 13.x clients (Python 3.8/3.9):** they read ahead 32 messages + 64 KiB, so T3 drops to plain-FIFO level (95.5% vs 95.1%).
+- **Full delivery returns ~66 s after a slow reader speeds up** (by design, to protect finals; freshness returns at once).
 
 ## Design rules we agreed on
 
@@ -104,10 +115,26 @@ Known residual risk: Day 4's end-of-run tail. A slow reader that retries full de
 | 2 ✅ | muhdbhz | **DONE** (`--no-coalesce` is the before/after flag). **Backpressure**: lag detection, provisional coalescing, constrained-bandwidth policy, `--naive` flag for before/after, channel unit tests, T3 gate. Start with the "Key finding" in `HANDOFF.md` (backlog sits in socket buffers, not our queue) | T3 gated in `check.py`: normal clients fresh, slow clients 100% finals, memory flat; earlier gates still green |
 | 3 ✅ | QiAn | **DONE** (lag-policy fixes for slow links and post-overload recovery handed to Day 4, see `HANDOFF.md`). **Browser client** (in-place revisions, provisional/final styling, ≥60 s local history, recall 30 s default + 15/30/60, auto-reconnect with finalized resume state, HISTORY dedup, configurable WS URL via query string) + **test tooling** (slow-then-fast convergence client, `check.py --stress` with 300–500 clients, bandwidth-test script). Finish any leftover Day 2 work | Manual browser checklist ticked; new tools run; earlier gates green |
 | 4 ✅ | Frankfurters | **DONE** (part 1: lag-policy fixes; part 2: reference-VM runs + two lag-policy fixes, see `HANDOFF.md`). T1–T5 × 3 runs (median); bandwidth + stress + convergence + 5-min memory runs; before/after comparisons | All gates green on the reference VM; results in `HANDOFF.md` |
-| 5 | Frankfurters | Charts, README (reproducible from a fresh clone), report draft from the Day 4 tables | Charts + README + report draft committed |
-| Meet-up | All | Integration fixes, demo video (5–7 min), `AI_USAGE.md`, `CONTRIBUTIONS.md`, final report, `submission_check.py --final`, viva walkthrough of each other's code | Submitted |
+| 2–3 Nov ✅ | lihloway | **DONE.** `hidden_sim.py` (25 scenarios, median of 3) and the fixes it led to: history cap + HISTORY byte cap, `LagMemory`, slow-reader reclassification, TCP segment cap; Python 3.8 support | `HANDOFF.md` "Update 2 Nov (2)/(3)" and "Update 3 Nov" |
+
+### Final stretch (3–4 Nov)
+
+| # | Task | Owner |
+|---|---|---|
+| 1 | `report.pdf`, split by section: architecture & protocol + revision/recovery (lihloway); overload policy incl. Day 4 changes + failures/trade-offs (muhdbhz); experiments & results, T1–T5 medians, before/after, why delay/loss raise P95/P99 (Frankfurters); client/usability + limitations/future work incl. the hidden-test table (QiAn). Frankfurters assembles and exports the PDF | all |
+| 2 | Demo video: run sheet, recording, editing; everyone watches it once before submission | QiAn |
+| 3 | README final read-through: team members + design notes (lihloway), overload notes (muhdbhz), T1–T5 commands + tools (Frankfurters), demo section (QiAn) | lihloway |
+| 4 | `AI_USAGE.md`: each person's own "What I checked myself" (muhdbhz, Frankfurters ×2 still open); confirm no other AI tools | each |
+| 5 | `CONTRIBUTIONS.md`: agree percentages on a call (currently a provisional 25% each) | all, lihloway writes up |
+| 6 | T3 before/after on the final code, ×3 on the reference VM, with and without the plain-queue setting | Frankfurters |
+| 7 | Charts (from Frankfurters' final raw results) | muhdbhz |
+| 8 | One consistent environment for the report tables; label every table; update the reference-environment paragraph below | Frankfurters |
+| 9 | Stale docs: `CLAUDE.md`, `TESTING.md` | lihloway |
+| 10 | Submission: zip from tracked files, fresh-unzip test, Canvas upload with the video, decide whether the repo stays public | lihloway |
 
 Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — WSL is not the reference environment. **Team decision (2 Nov): the reference environment is Frankfurters' Ubuntu 26.04.1 LTS VM** (Apple Silicon, aarch64, 2 vCPU, 5 GB, Python 3.14, timer drift +0–1%). Every final report table comes from it, on the final code (Day 4 part 2 in `HANDOFF.md`; data in `report/data/`), labelled "Ubuntu 26.04 VM (2 vCPU), median of 3". It replaces the earlier choice of the Mininet lab VM, because all final experiments already ran there on one code version; re-running everything elsewhere would cost ~2.5 h of machine time for no gain. Caveat to state in the report: with 2 vCPUs the 500-client stress/bandwidth runs share the CPU with the load generator, so their latencies are upper bounds. Day 1–3 numbers (WSL2, Mininet VM) stay in `HANDOFF.md` as development history; don't mix them into report tables. Any re-run for the report must use this VM.
+
+**Code changed after the Day 4 part 2 runs** (2–3 Nov: history cap + byte cap, `LagMemory`, reader reclassification, TCP segment cap, Python 3.8 changes). A/B runs on WSL2 showed no change on the public and bandwidth tests, but the reference-VM tables are from the earlier code. Task 8 above decides how the report handles that: re-run on the final code, or label the tables with the commit they ran on.
 
 **Before trusting any numbers, check `check.py`'s `asyncio timer drift` line (must be < 10%).** VirtualBox/Multipass on a Windows PC with Hyper-V on (WSL2, Docker, Core isolation) runs in "NEM" mode with timers 100–200% late, which makes every metric meaningless (see "Test environments" in `HANDOFF.md`). WSL2 is accurate and fine for development; the report's final tables come from the reference VM above.
 
@@ -121,12 +148,15 @@ Day 2 and Day 4 (and Day 3 for bandwidth tests) need Ubuntu for `tc/netem` — W
 Coverage checklist (spec gaps that public tests don't exercise — make sure each has an owner and a test):
 - [x] Constrained bandwidth: `bandwidth_test.py` (Day 3). Day 4 policy (ping budget, no stop-and-wait, RTT-classified lag, small send buffers) beats plain FIFO at 500 clients on 2 Mbit/s: 100% vs 98.7% finals, P95 1.14 vs 1.56 s, 60% vs 0% fresh; coverage 51% vs 99% is the trade-off (`HANDOFF.md`, Day 4). Reference VM, final code (Day 4 part 2): 100% vs 98.1% finals, P95 1.30 vs 1.59 s, 50% vs 0% fresh finals, coverage 58% vs 98%
 - [x] Scale beyond 100 clients: `check.py --stress` (300 / 500 / 500 + 10% slow; Day 3)
-- [~] Bursty / faster revisions and variable revision counts: 1/2/3/8 revisions unit-tested (Day 1); bursty source rate still untested
+- [x] Bursty / faster revisions and variable revision counts: 1/2/3/8 revisions unit-tested (Day 1); `hidden_sim` `revs8_slow`, `bursty_slow`, `burst3x_slow`, `bw2m_revs8`: 100% of due finals (3 Nov, WSL2, median of 3)
+- [x] Hidden-variation matrix: `hidden_sim.py`, 25 scenarios (3 Nov, WSL2, median of 3). Ours: 100% of due finals in 24, `bw2m_slow` 99.97%. Plain FIFO falls short in 7. Table in `HANDOFF.md` "Update 3 Nov"
+- [x] Reconnect beyond T4: 100% simultaneous reconnect, 50% away 30 s, 20% away 75 s, flapping clients, large HISTORY on 2 Mbit/s: all 100% (`hidden_sim`)
+- [x] Scale beyond 500 clients: `hidden_sim` `scale1000`, `scale1500_slow` (multi-process load): 100%
 - [~] Rapid convergence after overload ends: `convergence_test.py` (Day 3). Day 4: slow-*link* lag retries full delivery after ~10 s (jittered); slow-*reader* lag deliberately keeps 60–90 s (jitter upward only; ~66 s after the reader speeds up), because earlier retries cost T3 finals (98.3–99.96%). Reasoning in `HANDOFF.md`, Day 4 parts 1 and 2
 - [x] Long-run boundedness: 1-hour simulation unit-tested for server history (Day 1); 5-min real run with `monitor_server.py` (Day 4 part 2): RSS 36.9 → 37.1 MB, history plateaus at 120 finals; 99.87% finals (slow readers' tail, FIFO 98.39%)
 - [x] Network impairment T5 (Day 4 part 2): all 4 netem profiles x3, 100% finals; slow-link lag needs confirmation so public `delay_loss` keeps 99.93% coverage
 - [x] Robustness: unknown fields, `SOURCE_DONE`, malformed JSON, bad hello, abrupt client drop (`tests/test_server.py`, Day 1)
-- [ ] Browser: "What did I miss?" uses local state only; connection state visible; works when browser and server are on different hosts. Day 3
+- [x] Browser: "What did I miss?" from local state only, connection state, reconnect/recovery, late join, restart detection: automated in `tests/test_client.py` (Day 3, headless Firefox). Still to do by hand before recording the video: the manual checklist in `TESTING.md` §5, incl. a browser on a different host
 
 ## Handoff + documentation rules
 
