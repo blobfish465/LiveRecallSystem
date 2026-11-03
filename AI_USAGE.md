@@ -64,13 +64,24 @@
   3. I re-read the assignment's mandatory public tests against our state rather than taking the assistant's summary: T1–T4 are gated in `check.py`, T5 has only one WSL2 run, so Day 4 must re-run T1–T5 three times on one VM with valid timers, using the scripted tools rather than hand-typed `tc` commands, so that the report's numbers are reproducible and consistent across teammates.
   4. Decisions that were mine, not the tool's: the scope of the passwordless `sudo` rule (`/usr/sbin/tc` only, on this VM only); reporting the constrained-bandwidth loss honestly as a finding instead of re-tuning the experiment; and keeping the browser client's recall purely local (no request to the server), as the spec requires.
 
-### Day 4 part 1 (Frankfurters) — lag-policy fixes for slow links and recovery
+### Days 4–5 (Frankfurters) — lag-policy fixes, reference-VM runs, report results
 
-- **Tool:** Claude Code (Claude Opus 5.5), cloud session.
-- **Used for:** reproducing Day 3's constrained-bandwidth result, redesigning the lag policy in `liverecall/channel.py` (ping budget, no stop-and-wait, lag cause from the kernel's TCP RTT, recovery jitter, hopeless-by-unanswered-ping), small per-client send buffers in `solution_server.py`, unit tests, and running the bandwidth / convergence / T3 / stress experiments.
+- **Tool:** Claude Code (Claude Opus 5.5): a cloud session for Day 4 part 1, then a local session on the reference VM.
+- **Used for:**
+  - *Day 4 part 1:* reproducing Day 3's constrained-bandwidth result, redesigning the lag policy in `liverecall/channel.py` (ping budget, no stop-and-wait, lag cause from the kernel's TCP RTT, recovery jitter, hopeless-by-unanswered-ping), small per-client send buffers in `solution_server.py`, unit tests, and running the bandwidth / convergence / T3 / stress experiments.
+  - *Day 4 part 2:* running T1–T5 x3, bandwidth before/after, convergence, stress and the 5-minute memory run; diagnosing two failures those runs exposed; fixing them in `liverecall/channel.py` with unit tests.
+  - *Day 5:*
+    - README test commands;
+    - the results draft (`report/results.md`) and the chart data in `report/data/`;
+    - the `CONTRIBUTIONS.md` draft;
+    - explaining the system and metrics so I can present them;
+    - `burst_test.py`, a faster/bursty caption source (spec section 10 says the hidden tests may vary "caption revision rate and burstiness").
 - **Useful suggestions:**
   1. Read the kernel's smoothed TCP RTT (`TCP_INFO`) to tell a slow *link* from a slow *reader*: the client's kernel ACKs data whether or not its app reads, so a late pong with a low kernel RTT can only be the reader. It costs one `getsockopt` per lag decision and no network traffic.
   2. Look at caption age in 5 s windows instead of only the run's P95. That showed all 500 clients retrying full delivery in the same second (P50 ~80 ms between retries, ~900 ms during them), which ±50% jitter on the recovery wait fixed.
+  3. When T3 (60 s) lost finals in 2 of 3 runs, it matched the clients that lost finals against the `[stats]` `lagging` count per 10 s instead of re-running. The clients that left lag mode early were exactly the ones that lost tail finals, which pointed straight at Part 1's ±50% jitter turning the 60 s reader wait into 30 s. Fix: jitter upward only for readers (60–90 s).
+  4. On public T5 (`delay_loss`) it ran the plain-FIFO baseline on the same profile before proposing a fix. That showed our 93.5% coverage bought nothing (FIFO 99.97%, same P95), so the lag entries were false positives (retransmits delaying one pong) rather than a trade-off.
+  5. Test a faster and burstier source with the instructor's `caption_source.py`, unmodified, using its own `--revision-delay`/`--segment-gap` options and a transcript that mixes 1- and 3-revision sentences. This covers a hidden-test variable that no public test exercises without touching the harness. Result: 100% finals and coverage at 5× and 12× speed and in back-to-back bursts.
 - **Suggestions that were wrong or changed:**
   1. **A recovery probe that could not detect anything.**
      - *Suggestion:* Day 3's handoff (also drafted by Claude) proposed a probe for whether a slow reader has recovered. While in lag mode, the server would send one segment's provisionals (2 extra messages) and watch the next pong. A fast pong would mean the reader keeps up, so full delivery could return.
@@ -86,46 +97,23 @@
      - *Why it was wrong:* on the shaped loopback, our socket hands its data to the kernel's traffic shaper (tbf) almost at once. The backlog builds up in the shaper's queue, which all clients share, not in our per-client socket, so sends never block.
      - *How we found it:* a debug counter for the mode stayed at 0 across three 500-client runs.
      - *What we did:* removed the mode but kept the small send buffers, because a with/without run showed that they lower latency on their own.
-- **What I checked myself:** TODO (Frankfurters: read the diff and the "Why not for readers" paragraph in `HANDOFF.md` until you can explain the ping budget, the RTT classifier and why slow readers keep 60 s without notes).
-
-### Day 4 part 2 (Frankfurters) — reference-VM runs, two lag-policy fixes
-
-- **Tool:** Claude Code (Claude Opus 5.5), local session on the reference VM.
-- **Used for:** running T1–T5 x3, bandwidth before/after, convergence, stress and the 5-minute memory run; diagnosing two failures those runs exposed; fixing them in `liverecall/channel.py` with unit tests.
-- **Useful suggestions:**
-  1. When T3 (60 s) lost finals in 2 of 3 runs, it matched the clients that lost finals against the `[stats]` `lagging` count per 10 s instead of re-running. The clients that left lag mode early were exactly the ones that lost tail finals, which pointed straight at Part 1's ±50% jitter turning the 60 s reader wait into 30 s. Fix: jitter upward only for readers (60–90 s).
-  2. On public T5 (`delay_loss`) it ran the plain-FIFO baseline on the same profile before proposing a fix. That showed our 93.5% coverage bought nothing (FIFO 99.97%, same P95), so the lag entries were false positives (retransmits delaying one pong) rather than a trade-off.
-- **Suggestions that were wrong or changed:**
-  1. **A T5 fix that broke the bandwidth challenge.**
+  4. **A T5 fix that broke the bandwidth challenge.**
      - *Background:* on public T5 (`delay_loss`: 120 ms delay each way, 3% loss), TCP sometimes loses a packet carrying a ping or a pong. The retransmit waits at least 200 ms, so that pong comes back late. The link's kernel RTT (~240 ms) is above our 50 ms threshold, so the late pong was read as a slow link and the client switched to coalescing. Coverage dropped to 93.5% and bought nothing: plain FIFO on the same profile had 99.97% coverage with the same P95.
      - *Suggestion:* require "two late pongs in a row (or one very late, > 3 s)" before declaring slow-link lag. One retransmit only delays one pong, so T5 stopped entering lag.
      - *Why it was wrong:* on the 2 Mbit/s bandwidth test the links really are slow. Each time a link retries full delivery after 10 s and relapses, the rule makes the server wait for a second late pong before coalescing again. During that wait the full provisional stream piles up in the shared shaper queue. Fresh finals fell from 53% to 16%, 14 new clients' handshakes timed out, and one run had 98.97% finals (below the 99% cap line).
      - *How we found it:* the median of 3 looked fine. Only reading each run separately showed the bad one.
      - *What we did:* kept the rule for a link's *first* lag entry and added a relapse rule: a link already confirmed slow in the last 120 s is believed at its first late pong. Result: T5 coverage 99.93%, bandwidth fresh finals 50%, 100% finals in every run.
      - *Lesson:* check every run, not only the median, especially near the 99% line.
-  2. **Measuring the wrong process in the memory run.**
+  5. **Measuring the wrong process in the memory run.**
      - *Suggestion:* find the server's PID for `monitor_server.py` with `pgrep -f solution_server.py`.
      - *Why it was wrong:* commands run through `bash -c '...'`, and that shell's own command line also contains "solution_server.py". `pgrep` picked the shell, so the monitor reported a flat 3.6 MB, which looks like perfect boundedness.
      - *How we found it:* this happened in the first two attempts. 3.6 MB is far too small for a Python process running websockets.
      - *What we did:* match `python -u solution_server.py` and launch from a script file. The real server stayed flat at about 37 MB. The README now warns about this.
-  3. **Quick gate runs overwrote the full results.**
+  6. **Quick gate runs overwrote the full results.**
      - *Suggestion:* run a quick `python check.py` to re-check the gate after a fix.
      - *Why it was wrong:* the quick run writes to the same result file names as `check.py --full --runs 3`, so it overwrote the full-length T1–T4 JSONs we had already collected for the report.
      - *What we did:* re-ran `--full --runs 3` and archived the final runs in a separate folder (`results/day4p2/final/`), which `report/data/` is built from.
-- **What I checked myself:** TODO (Frankfurters).
-
-### Day 5 (Frankfurters) — results draft, chart data, faster/bursty source test
-
-- **Tool:** Claude Code (Claude Opus 5.5), local session on the reference VM.
-- **Used for:**
-  - README test commands;
-  - the results draft (`report/results.md`) and the chart data in `report/data/`;
-  - the `CONTRIBUTIONS.md` draft;
-  - explaining the system and metrics so I can present them;
-  - `burst_test.py`, a faster/bursty caption source (spec section 10 says the hidden tests may vary "caption revision rate and burstiness").
-- **Useful suggestion:** test a faster and burstier source with the instructor's `caption_source.py`, unmodified, using its own `--revision-delay`/`--segment-gap` options and a transcript that mixes 1- and 3-revision sentences. This covers a hidden-test variable that no public test exercises without touching the harness. Result: 100% finals and coverage at 5× and 12× speed and in back-to-back bursts.
-- **Suggestions that were wrong or changed:**
-  1. **A TCP-reset "fix" claimed from one run, then reverted.**
+  7. **A TCP-reset "fix" claimed from one run, then reverted.**
      - *Background:* with a 5× source plus T3's 500 ms readers, the readers cannot keep up even with finals alone, and finals dropped to about 92%.
      - *Suggestion:* close such hopeless readers with a TCP reset (`SO_LINGER 0`) instead of a WebSocket close frame. The close frame waits behind the backlog, so it never reached them before the test ended. A reset is immediate, and the client reconnects and gets every missed final in one HISTORY message.
      - *Why it was wrong:* it was reported as a fix after one good run. Three more runs and an in-process test showed it depends on timing. A reset cannot remove what is already in the client's own buffers, so it helps only when the reset lands well before the test ends (99.67–99.88% in 40 s runs, 96.74% at 60 s). The assistant also first wrote that the reset skips the client's backlog, and corrected the docstring and the test after the test showed otherwise.
@@ -134,7 +122,7 @@
        - Reverted the change rather than altering the server two days before the deadline. Every report number comes from the unchanged server.
        - Kept the measurement as a documented limitation (`HANDOFF.md`, Day 5).
      - *Lesson:* one good run is not evidence of a fix, and read the spec before optimising a case.
-- **What I checked myself:** TODO (Frankfurters).
+- **What I checked myself:** TODO (Frankfurters: read the diff and the "Why not for readers" paragraph in `HANDOFF.md` until you can explain the ping budget, the RTT classifier and why slow readers keep 60 s without notes).
 
 ### 2–3 Nov (lihloway) — hidden-condition testing, four server fixes, Python 3.8
 
