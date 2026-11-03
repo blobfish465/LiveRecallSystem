@@ -25,7 +25,22 @@
   2. It proposed a 30 s hopeless-client cap. Measured: it never fired, because our queue only sees the client's short pauses. Changed to 10 s, which fires for hopeless readers and never in T3.
   3. It first claimed slow clients would get sub-second latency. Wrong: the client library's 16-message read-ahead sets a floor of ~8–9 s P95, which we can't coalesce. Documented as a limitation.
   4. A review of its own lag-mode change found that provisionals queued *before* lag could be sent after their final (stale). Fixed with `_compact()` on lag entry, plus a test.
-- **What I checked myself:** TODO (muhdbhz: fill in what you read/verified so you can defend it in the viva).
+- **What I checked myself:**
+  1. **The code path, line by line.** I traced one caption from `handle_source` through `CaptionState.apply()`, `broadcast()` and `offer()` to the sender loop in `run()`, then a client from `handler()` and `handle_client` to the `finally` cleanup. I asked for the exact line of every claim and read it myself. For example, I couldn't find where the server pings, and found that `ws.ping` is passed into the channel as `ping=` in `handle_client`. For each concept I had a diagram drawn (the channel's queue and `_latest` map, the normal and lagging lanes, the lag states) and checked it against the code.
+  2. **Where the backlog really is.** I didn't take "16-message read-ahead" on trust. I checked that it is the websockets client's `max_queue` default, which the instructor's `load_clients.py` leaves unchanged, and that the kernel receive buffer is OS memory outside our code. That is why `max_pending` stays 0 in T3, and why a bounded queue alone can't fix freshness.
+  3. **Corrections to my own understanding.**
+     - `channel.py` runs on the server, not the client.
+     - The read-ahead and our `_queue` are different queues on different machines.
+     - A lagging client still holds the newest provisional of each segment.
+     - `handle_client` runs once per connection.
+     - The ping goes from the server to the client, and the client library answers it automatically.
+  4. **Lag rules against the constants.** I traced lag entry and exit against the constants in `channel.py`:
+     - what `_calm_since` records and what resets it;
+     - where `_recover_wait` is set, including the jitter;
+     - how a relapse is detected through `_left_lag_at` and `LagMemory`;
+     - the three conditions in `_can_leave_lag()`.
+  5. **Report figures against the data.** Figures 4 to 6 are generated from `report/data` by `make_charts.py`, not drawn by hand. I checked each footer against the number of runs in the data. The 5-minute memory test is one run each, not a median of 3, so Figure 6 says so. I did not let the assistant make up terminal screenshots for Appendix E. Those have to come from the reference VM.
+  6. **Commits were my decision.** Nothing was committed or pushed without my go-ahead, and every commit is under my own name.
 
 ### Day 3 (QiAn) — browser client, constrained-bandwidth experiment, stress gate, convergence test
 
