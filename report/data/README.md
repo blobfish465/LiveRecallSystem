@@ -20,6 +20,7 @@ From Frankfurters, 2 Nov. These are the final numbers behind the results section
 | `bandwidth.json` | `final_code` / `part1_code` → `runs.before` / `runs.after` (3 each). Each run also has `link_mbit_avg`, `link_mbit_peak5s`, `tbf_dropped`, `server_rss_mb_max`, and `server` (`[stats]` peaks) | **Main before/after:** bars for final completeness, P50, P95, fresh finals %, coverage. Use `final_code` |
 | `bandwidth_windows_10s.csv` | `config, run, window_start_s, messages, p50_ms, p95_ms`: caption age per 10 s window, before vs after, 3 runs | **Fig 3:** line chart over time. FIFO flat at ~1.1 s, ours lower |
 | `caption_age_percentiles.csv` | Percentiles 1–99 + max of caption age (ms), **run 1 only**, columns `t3_{after,before}_{normal,slow}`, `bandwidth_{after,before}`, `t5_delay_loss_{final,fifo}` | CDF-style curves (x = caption age, y = percentile), e.g. T3 slow clients before vs after |
+| `burst.json` | Faster / bursty source (`burst_test.py`): `fast5_mixed`, `fast12`, `burst`, 3 runs each; pacing in `pace` | Optional: one more row in the T1–T5 bar chart, or a table |
 | `stress.json` | `s300`, `s500`, `s500slow`, 3 runs each (same fields) | Optional: P95 vs client count (20 / 100 / 300 / 500, using T1/T2 for the small ones) |
 | `convergence.json` | `slow30_of_120` (3 runs per config) and `slow90_of_230` (1 run): `convergence_test.py` summaries incl. per-switch metrics | Optional; the report uses a table |
 | `memory_5min.json` | Analyser summaries of the 5-minute run, `after` and `before_fifo` | – |
