@@ -21,7 +21,7 @@ python -m pytest -q          # ~15 s; 150 tests (144 + 6 browser tests, skipped 
 | `tests/test_state.py` | 32 | revision rules, final durability, malformed/unknown fields, variable revision counts (1/2/3/8), history bounded by time + count, evicted-segment rejection, active-segment cap, 1-hour boundedness, HISTORY selection (fresh vs resume, 60 s clamp, ordering, finals only), 60 s at 50 segments/s, the 768 KiB reply cap (newest kept, exact boundary) |
 | `tests/test_channel.py` | 52 | control-first ordering, full delivery when not lagging, opt-in coalescing (in place, finals/control never replaced), lag detection by late pong (finals/control only, sent without waiting for pongs), ping budget, lag cause from kernel RTT (slow link vs slow reader) and its recovery wait, recovery jitter bounds, compaction on lag entry (no provisional after its final), recovery after fast pongs + backoff on relapse (never below the cause's base), hopeless cap (age + count + unanswered ping, not on a slow link) closes, send/pong failure, offer() never blocks, `LagMemory` (bounded, expiring, per client; a lagging client resumes lag mode on reconnect), slow-link lag reclassified as reader lag when a pong is stuck |
 | `tests/test_server.py` | 10 | real WebSockets in-process: late join HISTORY→live, resume sends only missed finals, 30 clients joining during a burst see every final exactly once (atomic snapshot+register), source garbage/unknown types/SOURCE_DONE ignored, bad hello → 1008, abrupt client drop doesn't affect others, `[stats]` totals survive disconnects, listening socket caps TCP segments at 1400 B (Linux; skipped where the option can't be read) |
-| `tests/test_client.py` | 6 | browser e2e in headless Firefox (see §5); skipped where Firefox/geckodriver are missing |
+| `tests/test_client.py` | 6 | browser e2e in headless Firefox (see §5); skipped where Firefox/geckodriver are missing. All 6 pass on the final code (3 Nov, WSL2, Firefox 159 snap, `python -m pytest -m browser`) |
 | `tests/test_check.py` | 15 | `check.py`: server-log parsing, `[stats]` peaks, gate rules |
 | `tests/test_bandwidth_tool.py` | 5 | `bandwidth_test.py`: tc output parsing, link-rate maths |
 | `tests/test_convergence_tool.py` | 12 | `convergence_test.py`: metric definitions |
@@ -143,7 +143,7 @@ How it runs:
 ## 5. Manual checklist (browser, Day 3)
 
 Automated in `tests/test_client.py` (real server + page in headless Firefox via selenium; skipped where
-Firefox/geckodriver are missing, e.g. WSL2): in-place revision replacement and provisional/final styling,
+Firefox/geckodriver are missing; on WSL2, `snap install firefox` provides both under `/snap/bin`): in-place revision replacement and provisional/final styling,
 recall 15/30/60 s from local state only with each line's age and the Hide button, drop → auto-reconnect →
 HISTORY recovery with no duplicates, resume from the latest final and the status line's "recovered N missed
 captions" message, late join in a second tab, server+source restart detection.
@@ -167,5 +167,6 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 - [x] Day 4: bandwidth policy fix + re-run section 3 (cloud container, median of 3; re-run on the reference VM)
 - [x] Day 4: T5 tc/netem ×3 (all 4 profiles) and the 5-minute memory run with `monitor_server.py` (reference VM, `HANDOFF.md` Day 4 part 2)
 - [x] 2–3 Nov: Python 3.8 test run; `hidden_sim.py` (25 scenarios, median of 3); unit tests for the history byte cap, `LagMemory`, reader reclassification and the TCP segment cap
+- [x] 3 Nov: the 6 browser tests on the final code (WSL2 + Firefox snap): 6 passed
 - [ ] Final code on the reference VM: T3 before/after ×3 (Frankfurters, task 6 in `CLAUDE.md`)
 - [ ] Manual browser checklist (§5), incl. a browser on another host, before recording the demo video (QiAn)
