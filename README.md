@@ -4,9 +4,10 @@
 
 ## Team members
 
-- TODO: Name / student ID / responsibility (×4)
-- Tay Cole Lin / A0210841U / Architecture & protocol, revision/recovery semantics
-- Ong Qi An / A0281202W / browser client, constrained bandwidth, stress gate
+- Tay Cole Lin / A0210841U / server core (revision state, bounded history, reconnect/late-join recovery), test suite and regression gate, hidden-condition testing and fixes, submission
+- Muhammad Bin Hamzah / A0272938N / overload policy v1 (slow-reader backpressure), report figures and charts
+- Ong Qi An / A0281202W / browser client, constrained-bandwidth, stress and convergence tooling, demo video
+- Nicholas Kee / A0308575W / overload policy v2 (slow links), reference-VM experiments, report assembly
 
 ## Ubuntu setup
 
