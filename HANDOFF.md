@@ -563,3 +563,23 @@ Memory is flat in both; server history plateaus at 120 finals after ~90 s (`[sta
 Day 5 (team decision 30 Oct): charts, README (reproducible from a fresh clone), report draft, from the tables in this section. **Charts (muhdbhz): the curated data is in `report/data/` (every run of every table, ~160 KB); start with `report/data/README.md`.** Results section draft: `report/results.md`. Open for the team: re-running stress on the 4-vCPU Mininet VM; the end-of-window tail-loss trade-off above.
 
 Claude suggestions I rejected: the strike rule without the relapse exception (cost the bandwidth challenge, see fix 2); trusting the first memory run (it measured a shell).
+
+## Day 5 — Frankfurters — faster/bursty source (`burst_test.py`), report support
+
+Done: README test commands; `report/results.md` (results section draft); curated data for the charts in `report/data/` (handoff note for muhdbhz: `report/data/README.md`); T3 before/after on the final code (FIFO 95.13% vs ours 100% finals; in the results draft); `CONTRIBUTIONS.md` draft; reference environment recorded in `CLAUDE.md`; and the faster/bursty-source test below. No server code changed on Day 5.
+
+### Faster / bursty source (`burst_test.py`, 100 clients, 40 s, median of 3, reference VM, drift +0%)
+
+The spec's hidden evaluation may vary "caption revision rate and burstiness" (section 10), which no public test exercises. `burst_test.py` repeats `run_demo.py`'s wiring with the unmodified harness and only passes `caption_source.py`'s own `--revision-delay` / `--segment-gap` (and a mixed transcript: the public generator emits 1 revision for sentences under 4 words, 3 otherwise).
+
+| scenario | source pace | finals | coverage | P50 / P95 / P99 | fresh | dup / stale / errors |
+|---|---|---:|---:|---:|---:|---:|
+| `fast5_mixed` | 50 ms / 50 ms, 1 or 3 revisions (~20 msg/s, 5x) | 100% | 100% | 5.2 / 18.4 / 53.6 ms | 100% | 0 / 0 / 0 |
+| `fast12` | 20 ms / 20 ms (~50 msg/s, 12x) | 100% | 100% | 4.4 / 9.4 / 23.2 ms | 100% | 0 / 0 / 0 |
+| `burst` | 3 revisions back to back, 0.35 s gap | 100% | 100% | 9.9 / 22.9 / 40.0 ms | 100% | 0 / 0 / 0 |
+
+(Run with the same driver logic before it moved into the repo; data in `report/data/burst.json`.)
+
+**Out of scope, measured anyway:** a 5x source *plus* 10% T3 readers (500 ms/msg). The source then sends ~6.6 finals/s and a reader takes 2 msg/s, so it cannot keep up even with finals alone: FIFO 91.06%, ours 92.07% finals (normal clients unaffected, P95 ~10 ms). Our hopeless-client close (1013) never reaches those readers before a test ends, because the close frame queues behind their backlog. A TCP reset instead (SO_LINGER 0) helped (99.67–99.88% in 40 s runs, 96.74% at 60 s) but could not skip what was already in the client's buffers, so recovery depended on timing. **Reverted** after reading the spec: requirement 11 says "the evaluation will not intentionally make a client permanently so slow that it cannot keep up even with the final-caption stream alone", so this case is excluded, and we did not change the server two days before the deadline. Worth knowing for the viva ("what if a reader is slower than the finals?": it is closed as hopeless and recovers via HISTORY, where one message carries all missed finals).
+
+Claude suggestion I rejected: keeping the TCP-reset change. It was first reported as a fix from one good run; three more runs and an in-process test showed it only helps when the reset reaches the client before the test ends.

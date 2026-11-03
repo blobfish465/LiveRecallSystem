@@ -109,4 +109,4 @@ Still check by hand before the demo (`python -m http.server 8000 --directory cli
 - [x] Day 3: `check.py --stress` (section 2; medians in `HANDOFF.md`)
 - [x] Day 3: slow-then-fast convergence client (section 4)
 - [x] Day 4: bandwidth policy fix + re-run section 3 (cloud container, median of 3; re-run on the reference VM)
-- [ ] Day 4: T5 tc/netem x3; 5-minute memory run with `monitor_server.py`
+- [x] Day 4: T5 tc/netem x3 (4 profiles); 5-minute memory run with `monitor_server.py` (reference VM, results in `HANDOFF.md` Day 4 part 2)
