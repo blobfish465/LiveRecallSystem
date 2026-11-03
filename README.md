@@ -1,7 +1,5 @@
 # Team 14 - LiveRecall
 
-> Work in progress. Sections marked TODO are filled in by later days (see `CLAUDE.md`).
-
 ## Team members
 
 - Tay Cole Lin / A0210841U / server core (revision state, bounded history, reconnect/late-join recovery), test suite and regression gate, hidden-condition testing and fixes, submission
@@ -31,7 +29,7 @@ pip install -r requirements-dev.txt      # + pytest, for tests
 python solution_server.py --port 8765
 ```
 
-The server binds `0.0.0.0`, needs only `websockets`, and prints a one-line `[stats]` summary every 10 s (clients, history size, max per-client queue, dropped provisionals).
+The server binds `0.0.0.0`, needs only `websockets`, and prints a one-line `[stats]` summary every 10 s (clients, lagging clients, history size, max per-client queue, coalesced provisionals, lag entries, hopeless closes).
 
 ## Browser client
 
@@ -143,7 +141,7 @@ wait
 
 ## Mandatory deterministic application demo
 
-Demo video (5–7 min): VIDEO_LINK
+Demo video (5–7 min): https://drive.google.com/file/d/1B3rZ15Mzz7qQOrAzYEFlYQCan33i9bJY/view?usp=sharing
 
 Uses the submitted server and browser client with the supplied `caption_source.py`. Activate the venv in each terminal.
 
@@ -171,9 +169,9 @@ python caption_source.py --duration 900 --revision-delay 1.0 --segment-gap 0.8
 - **Revision state** (`liverecall/state.py`): per-segment latest revision; updates with revision ≤ current, or for an already-final segment, are rejected and never forwarded. Finals are durable.
 - **Bounded server history**: finals kept in a deque bounded by 90 s **and** 6000 items (60 s of recovery even at ~100 segments/s), each HISTORY reply capped at 768 KiB; stale updates for evicted segments are rejected via a single "evicted floor" integer.
 - **Reconnect / late join**: on `CLIENT_HELLO` the server snapshots HISTORY and registers the client with no `await` in between (atomic in asyncio), so each final reaches the client exactly once. Fresh joins get the last `history_seconds` (≤ 60 s); resumes get every retained final after `last_segment`.
-- **Per-client buffering** (`liverecall/channel.py`): one bounded queue + sender task per client; the source never awaits a client. TODO (Day 2): lag-aware coalescing and bandwidth policy.
-- **Overload behaviour**: TODO (Day 2).
-
-## Optional ASR bonus
-
-Not attempted (yet).
+- **Per-client buffering** (`liverecall/channel.py`): one bounded queue + sender task per client; the source handler calls `offer()`, which never awaits, so a slow client cannot slow the source or other clients. Each update is serialised once and the same string is shared by all clients.
+- **Lag detection**: `ws.send()` returns once bytes reach the kernel, so a slow reader's backlog sits in socket buffers and the client library's read-ahead, not in our queue. Each channel therefore pings at most once per second; a pong later than 1 s marks the client as lagging. The kernel's TCP RTT (`TCP_INFO`) gives the cause: below 50 ms a **slow reader**, otherwise a **slow link** (confirmed by two late pongs in a row; a pong pending longer than max(6 s, 4 × RTT) reclassifies it as a slow reader).
+- **Overload behaviour (lag mode only)**: finals are sent at once and never dropped; a new provisional overwrites the unsent provisional of its segment in place, so the queue holds at most one provisional per segment and each message keeps its own `source_ts`. Under normal conditions every revision is delivered (Normal Update Coverage).
+- **Return to full delivery**: retried after 60–90 s of on-time pongs for a slow reader and 5–15 s for a slow link, doubling on each relapse up to 120 s.
+- **Bounds**: a queue over 64 entries, a caption queued over 10 s, or a reader's ping unanswered for 10 s closes the client with code 1013; it reconnects and recovers from HISTORY (the server never sends HISTORY unsolicited). A lag memory (4096 client ids, 120 s each) makes a reconnecting lagging client resume lag mode. Kernel send buffers are kept small (512 B unsent) so the backlog stays in our queue where it can be coalesced, and the listening socket sets `TCP_MAXSEG = 1400` so large HISTORY replies pass a 2 Mbit/s token-bucket shaper.
+- **Baseline**: `LIVERECALL_NO_COALESCE=1` turns all of the above off (plain FIFO per client) for before/after comparisons.
