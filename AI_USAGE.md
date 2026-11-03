@@ -160,7 +160,6 @@
   - **Sonnet sub-agents:** implementation steps on Day 2.
   - **Fable 5.1, with reviewer and skeptic sub-agents:** Day 3, to check each change before it was committed.
 - **What it was used for:** explaining the spec, the harness and our own code; designing and implementing the server, the overload policy, the browser client and our test tools; running and analysing experiments; drafting handoff notes and documentation. Every commit was reviewed, explained back and pushed by the team member named in `CONTRIBUTIONS.md`.
-- TODO (team): confirm nobody used any other AI tool (ChatGPT, Copilot, Gemini, ...); add it here if they did.
 
 ## One useful suggestion
 
