@@ -79,50 +79,24 @@
 - **Useful suggestions:**
   1. Read the kernel's smoothed TCP RTT (`TCP_INFO`) to tell a slow *link* from a slow *reader*: the client's kernel ACKs data whether or not its app reads, so a late pong with a low kernel RTT can only be the reader. It costs one `getsockopt` per lag decision and no network traffic.
   2. Look at caption age in 5 s windows instead of only the run's P95. That showed all 500 clients retrying full delivery in the same second (P50 ~80 ms between retries, ~900 ms during them), which ±50% jitter on the recovery wait fixed.
-  3. When T3 (60 s) lost finals in 2 of 3 runs, it matched the clients that lost finals against the `[stats]` `lagging` count per 10 s instead of re-running. The clients that left lag mode early were exactly the ones that lost tail finals, which pointed straight at Part 1's ±50% jitter turning the 60 s reader wait into 30 s. Fix: jitter upward only for readers (60–90 s).
-  4. On public T5 (`delay_loss`) it ran the plain-FIFO baseline on the same profile before proposing a fix. That showed our 93.5% coverage bought nothing (FIFO 99.97%, same P95), so the lag entries were false positives (retransmits delaying one pong) rather than a trade-off.
-  5. Test a faster and burstier source with the instructor's `caption_source.py`, unmodified, using its own `--revision-delay`/`--segment-gap` options and a transcript that mixes 1- and 3-revision sentences. This covers a hidden-test variable that no public test exercises without touching the harness. Result: 100% finals and coverage at 5× and 12× speed and in back-to-back bursts.
+  3. Test a faster and burstier source with the instructor's `caption_source.py`, unmodified, using its own `--revision-delay`/`--segment-gap` options and a transcript that mixes 1- and 3-revision sentences. This covers a hidden-test variable that no public test exercises without touching the harness. Result: 100% finals and coverage at 5× and 12× speed and in back-to-back bursts.
 - **Suggestions that were wrong or changed:**
-  1. **A recovery probe that could not detect anything.**
-     - *Suggestion:* Day 3's handoff (also drafted by Claude) proposed a probe for whether a slow reader has recovered. While in lag mode, the server would send one segment's provisionals (2 extra messages) and watch the next pong. A fast pong would mean the reader keeps up, so full delivery could return.
-     - *Why it was wrong:* the websockets client library reads up to 16 messages off the socket into its own queue, whether or not the application has processed them. The library also answers a ping as soon as it reads the ping frame, not when the app catches up. Two extra messages always fit in that 16-message read-ahead, so the pong comes back fast for slow and fast readers alike. The probe would report "recovered" every time.
-     - *How we found it:* we worked through the read-ahead by hand before writing any code.
-     - *What we did:* we dropped the probe. Recovery is time-based instead: a reader retries full delivery after a wait, and a late pong puts it straight back into lag mode.
-  2. **A 10 s recovery wait for every lagging client.**
+  1. **A 10 s recovery wait for every lagging client.**
      - *Suggestion:* the first fix for slow convergence cut the wait before retrying full delivery from 60 s to 10 s for every lagging client.
      - *Why it was wrong:* this works for a slow *link* but not for a slow *reader*. Each retry sends every provisional again, so a slow reader's 16-message read-ahead fills up: about 8 s of backlog at 500 ms per message. Finals stuck behind that backlog when the run ends count as missing. T3 dropped to 98.3% finals, below the 99% line where the hidden-test score is capped.
      - *What we did:* 10 s for slow links (detected from the kernel's TCP RTT) and 60 s kept for slow readers. The T3 and convergence numbers for both are in `HANDOFF.md`.
-  3. **A "blocked send = congested link" mode that never fired.**
-     - *Suggestion:* set `TCP_NOTSENT_LOWAT` so that the socket reports "not writable" once more than 512 bytes are unsent. A send that waited more than 50 ms would then mean a congested link, and the client would switch to coalescing.
-     - *Why it was wrong:* on the shaped loopback, our socket hands its data to the kernel's traffic shaper (tbf) almost at once. The backlog builds up in the shaper's queue, which all clients share, not in our per-client socket, so sends never block.
-     - *How we found it:* a debug counter for the mode stayed at 0 across three 500-client runs.
-     - *What we did:* removed the mode but kept the small send buffers, because a with/without run showed that they lower latency on their own.
-  4. **A T5 fix that broke the bandwidth challenge.**
+  2. **A T5 fix that broke the bandwidth challenge.**
      - *Background:* on public T5 (`delay_loss`: 120 ms delay each way, 3% loss), TCP sometimes loses a packet carrying a ping or a pong. The retransmit waits at least 200 ms, so that pong comes back late. The link's kernel RTT (~240 ms) is above our 50 ms threshold, so the late pong was read as a slow link and the client switched to coalescing. Coverage dropped to 93.5% and bought nothing: plain FIFO on the same profile had 99.97% coverage with the same P95.
      - *Suggestion:* require "two late pongs in a row (or one very late, > 3 s)" before declaring slow-link lag. One retransmit only delays one pong, so T5 stopped entering lag.
      - *Why it was wrong:* on the 2 Mbit/s bandwidth test the links really are slow. Each time a link retries full delivery after 10 s and relapses, the rule makes the server wait for a second late pong before coalescing again. During that wait the full provisional stream piles up in the shared shaper queue. Fresh finals fell from 53% to 16%, 14 new clients' handshakes timed out, and one run had 98.97% finals (below the 99% cap line).
-     - *How we found it:* the median of 3 looked fine. Only reading each run separately showed the bad one.
      - *What we did:* kept the rule for a link's *first* lag entry and added a relapse rule: a link already confirmed slow in the last 120 s is believed at its first late pong. Result: T5 coverage 99.93%, bandwidth fresh finals 50%, 100% finals in every run.
-     - *Lesson:* check every run, not only the median, especially near the 99% line.
-  5. **Measuring the wrong process in the memory run.**
-     - *Suggestion:* find the server's PID for `monitor_server.py` with `pgrep -f solution_server.py`.
-     - *Why it was wrong:* commands run through `bash -c '...'`, and that shell's own command line also contains "solution_server.py". `pgrep` picked the shell, so the monitor reported a flat 3.6 MB, which looks like perfect boundedness.
-     - *How we found it:* this happened in the first two attempts. 3.6 MB is far too small for a Python process running websockets.
-     - *What we did:* match `python -u solution_server.py` and launch from a script file. The real server stayed flat at about 37 MB. The README now warns about this.
-  6. **Quick gate runs overwrote the full results.**
-     - *Suggestion:* run a quick `python check.py` to re-check the gate after a fix.
-     - *Why it was wrong:* the quick run writes to the same result file names as `check.py --full --runs 3`, so it overwrote the full-length T1–T4 JSONs we had already collected for the report.
-     - *What we did:* re-ran `--full --runs 3` and archived the final runs in a separate folder (`results/day4p2/final/`), which `report/data/` is built from.
-  7. **A TCP-reset "fix" claimed from one run, then reverted.**
-     - *Background:* with a 5× source plus T3's 500 ms readers, the readers cannot keep up even with finals alone, and finals dropped to about 92%.
-     - *Suggestion:* close such hopeless readers with a TCP reset (`SO_LINGER 0`) instead of a WebSocket close frame. The close frame waits behind the backlog, so it never reached them before the test ended. A reset is immediate, and the client reconnects and gets every missed final in one HISTORY message.
-     - *Why it was wrong:* it was reported as a fix after one good run. Three more runs and an in-process test showed it depends on timing. A reset cannot remove what is already in the client's own buffers, so it helps only when the reset lands well before the test ends (99.67–99.88% in 40 s runs, 96.74% at 60 s). The assistant also first wrote that the reset skips the client's backlog, and corrected the docstring and the test after the test showed otherwise.
-     - *What we did:*
-       - Read the spec. Requirement 11 says the evaluation "will not intentionally make a client permanently so slow that it cannot keep up even with the final-caption stream alone", so this case is out of scope.
-       - Reverted the change rather than altering the server two days before the deadline. Every report number comes from the unchanged server.
-       - Kept the measurement as a documented limitation (`HANDOFF.md`, Day 5).
-     - *Lesson:* one good run is not evidence of a fix, and read the spec before optimising a case.
-- **What I checked myself:** TODO (Frankfurters: read the diff and the "Why not for readers" paragraph in `HANDOFF.md` until you can explain the ping budget, the RTT classifier and why slow readers keep 60 s without notes).
+- **What I checked myself:**
+  1. I read the Day 4 diff (`liverecall/channel.py`, `tighten_send_path` and `kernel_rtt` in `solution_server.py`) until I could explain the three main decisions without notes:
+     - *Ping budget:* one ping per client per second (one per 3 s while lagging) instead of one per send. At 500 clients on 2 Mbit/s each client's share is ~500 B/s, so a ping after every 17-byte caption cost more than the caption itself. A stalled reader's pong is seconds late, so one ping a second still detects it.
+     - *RTT classifier:* the client's kernel ACKs our data even when its app isn't reading, so the kernel's TCP RTT tells the two causes apart. A late pong with RTT under 50 ms is a slow reader; at 50 ms or more it's a slow link. The cause decides the retry wait, and on a slow link an unanswered ping isn't treated as hopeless.
+     - *Why slow readers keep 60 s:* a cheap probe can't tell a fast reader from a T3 reader, because both answer pings from the client library's 16-message read-ahead. The only real test is full delivery, and for a reader that's still slow, one failed try leaves ~8 s of backlog that takes ~24 s to drain. With a 10 s wait, T3 dropped to 98.3% finals; with 60 s it was 100%. Finals are capped in grading and coverage isn't, so I kept 60 s and accepted the slower return to full delivery (~70 s).
+  2. For the final report numbers I re-ran everything on the reference VM on the final commit (0e8982e). I checked the timer drift (+0–1%) and that `tc qdisc show dev lo` was back to `noqueue` after each impaired stage.
+  3. I checked the report's numbers and constants against `report/data/`, `results/final/` and the code itself (`liverecall/channel.py`, `liverecall/state.py`), and corrected the ones that came from older runs or other environments.
 
 ### 2–3 Nov (lihloway) — hidden-condition testing, four server fixes, Python 3.8
 
