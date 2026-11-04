@@ -278,3 +278,25 @@ def test_listening_socket_caps_segment_size():
         assert 0 < value <= solution_server.MAX_SEGMENT < 4000
     finally:
         sock.close()
+
+
+def test_accepted_sockets_have_nodelay():
+    """asyncio sets TCP_NODELAY only if the listening socket's proto is IPPROTO_TCP;
+    with proto 0 Nagle stays on and adds up to an RTT per caption on delayed links."""
+    import socket
+
+    async def main():
+        seen = asyncio.get_running_loop().create_future()
+
+        async def record(ws):
+            sock = ws.transport.get_extra_info("socket")
+            seen.set_result(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+            await ws.wait_closed()
+
+        listener = solution_server.listening_socket(0)
+        port = listener.getsockname()[1]
+        async with solution_server.serve(record, sock=listener):
+            async with websockets.connect(f"ws://127.0.0.1:{port}"):
+                assert await asyncio.wait_for(seen, 5) != 0
+
+    asyncio.run(main())

@@ -262,7 +262,11 @@ MAX_SEGMENT = 1400
 
 
 def listening_socket(port: int) -> socket.socket:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # proto must be IPPROTO_TCP, not the default 0: asyncio only sets TCP_NODELAY on
+    # accepted sockets when sock.proto == IPPROTO_TCP. With 0, Nagle stayed on and each
+    # small caption could wait an extra RTT for the previous ACK (T5 delay_100ms
+    # P95 254 -> 388 ms on the reference VM).
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
     if os.name == "posix":  # what asyncio.create_server sets; on Windows it would allow port stealing
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     maxseg = getattr(socket, "TCP_MAXSEG", None)
