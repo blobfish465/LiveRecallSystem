@@ -1,8 +1,8 @@
-"""Collect the Day 4 part 2 results into a small bundle for the charts/report.
+"""Collect the final-code results (4 Nov re-run, commit 0e8982e) into a small bundle for the charts/report.
 
 Run from the repo root: python report/build_data.py report/data
 Reads only results/ (gitignored raw output); writes JSON/CSV summaries (report/data/README.md describes them).
-Only reproducible on the machine that holds those results/ files (the Day 4 reference VM).
+Only reproducible on the machine that holds those results/ files (the reference VM).
 """
 import csv
 import glob
@@ -13,7 +13,7 @@ import statistics
 import sys
 
 R = "results"
-D = "results/day4p2"
+D = "results/final"
 out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 
@@ -34,40 +34,46 @@ def dump(name, obj):
 
 
 # 1. Public tests T1-T4 + late join, final code (check.py --full --runs 3).
-dump("public_tests.json", {s: runs(f"{D}/final/check_{s}_run0*.json") for s in ("t1", "t2", "t3", "t4", "late")})
+dump("public_tests.json", {s: runs(f"{D}/check/check_{s}_run0*.json") for s in ("t1", "t2", "t3", "t4", "late")})
 
 # 2. T3 before/after, final code, interleaved.
 dump("t3_before_after.json", {c: runs(f"{D}/t3ba/t3_{c}_r?.json") for c in ("before", "after")})
 
 # 3. T5 network impairment.
 dump("t5.json", {
-    "delay_loss_final": runs(f"{D}/fix3/t5_delay_loss_run0*.json"),
-    "delay_loss_part1_code": runs(f"{D}/t5_delay_loss_run0*.json"),
-    "delay_loss_fifo": runs(f"{D}/t5_delay_loss_fifo_run0*.json"),
-    "delay_100ms": runs(f"{D}/t5_delay_100ms_run0*.json"),
-    "loss_3pct": runs(f"{D}/t5_loss_3pct_run0*.json"),
-    "reorder": runs(f"{D}/t5_reorder_run0*.json"),
+    "delay_loss_final": runs(f"{D}/t5/t5_delay_loss_run0*.json"),
+    "delay_loss_fifo": runs(f"{D}/t5/t5_delay_loss_fifo_run0*.json"),
+    "delay_100ms": runs(f"{D}/t5/t5_delay_100ms_run0*.json"),
+    "loss_3pct": runs(f"{D}/t5/t5_loss_3pct_run0*.json"),
+    "reorder": runs(f"{D}/t5/t5_reorder_run0*.json"),
 })
 
 # 4. Stress (check.py --stress --runs 3, final code).
-dump("stress.json", {s: runs(f"{D}/final/check_{s}_run0*.json") for s in ("s300", "s500", "s500slow")})
+dump("stress.json", {s: runs(f"{D}/check_stress/check_{s}_run0*.json") for s in ("s300", "s500", "s500slow")})
 
 # 5. Bandwidth before/after (summaries hold every run + link/tbf/server stats).
 dump("bandwidth.json", {
-    "final_code": load(f"{R}/bandwidth_limited_day4p2fix3_c500_summary.json"),
-    "part1_code": load(f"{R}/bandwidth_limited_day4p2_c500_summary.json"),
+    "final_code": load(f"{R}/bandwidth_limited_final_c500_summary.json"),
 })
 
 # 6. Convergence.
 dump("convergence.json", {
-    "slow30_of_120": load(f"{R}/convergence_day4p2_c100_k10_s30_d120_m500_summary.json"),
-    "slow90_of_230": load(f"{R}/convergence_day4p2_c100_k10_s90_d230_m500_summary.json"),
+    "slow30_of_120": load(f"{R}/convergence_final_c100_k10_s30_d120_m500_summary.json"),
+    "slow90_of_230": load(f"{R}/convergence_final_c100_k10_s90_d230_m500_summary.json"),
+})
+
+# 6b. Faster / bursty source (burst_test.py, 3 runs each).
+dump("burst.json", {
+    "pace": {"fast5_mixed": "revision-delay 0.05, segment-gap 0.05, mixed 1/3-revision transcript",
+             "fast12": "revision-delay 0.02, segment-gap 0.02",
+             "burst": "revision-delay 0.0, segment-gap 0.35"},
+    "runs": {s: runs(f"{D}/burst/{s}_run0*.json") for s in ("fast5_mixed", "fast12", "burst")},
 })
 
 # 7. 5-minute memory run: summaries, RSS series, [stats] series.
-dump("memory_5min.json", {"after": load(f"{D}/mem5min.json"), "before_fifo": load(f"{D}/mem5min_fifo.json")})
+dump("memory_5min.json", {"after": load(f"{D}/mem/mem5min_after.json"), "before_fifo": load(f"{D}/mem/mem5min_fifo.json")})
 STATS = re.compile(r"^\[stats (\S+)\] (.*)$")
-for cfg, stem in (("after", "mem5min"), ("before_fifo", "mem5min_fifo")):
+for cfg, stem in (("after", "mem/mem5min_after"), ("before_fifo", "mem/mem5min_fifo")):
     with open(f"{D}/{stem}_rss.csv") as f, open(os.path.join(out, f"memory_5min_rss_{cfg}.csv"), "w") as g:
         g.write(f.read())
     rows = []
@@ -110,10 +116,10 @@ CDF = {
     "t3_before_normal": (f"{D}/t3ba/t3_before_r1.csv", "0"),
     "t3_after_slow": (f"{D}/t3ba/t3_after_r1.csv", "1"),
     "t3_before_slow": (f"{D}/t3ba/t3_before_r1.csv", "1"),
-    "bandwidth_after": (f"{R}/bandwidth_limited_day4p2fix3_c500_after_run01.csv", None),
-    "bandwidth_before": (f"{R}/bandwidth_limited_day4p2fix3_c500_before_run01.csv", None),
-    "t5_delay_loss_final": (f"{D}/fix3/t5_delay_loss_run01.csv", None),
-    "t5_delay_loss_fifo": (f"{D}/t5_delay_loss_fifo_run01.csv", None),
+    "bandwidth_after": (f"{R}/bandwidth_limited_final_c500_after_run01.csv", None),
+    "bandwidth_before": (f"{R}/bandwidth_limited_final_c500_before_run01.csv", None),
+    "t5_delay_loss_final": (f"{D}/t5/t5_delay_loss_run01.csv", None),
+    "t5_delay_loss_fifo": (f"{D}/t5/t5_delay_loss_fifo_run01.csv", None),
 }
 cdf = {}
 for name, (path, slow) in CDF.items():
@@ -130,7 +136,7 @@ with open(os.path.join(out, "bandwidth_windows_10s.csv"), "w", newline="") as g:
     w.writerow(["config", "run", "window_start_s", "messages", "p50_ms", "p95_ms"])
     for cfg in ("before", "after"):
         for run in (1, 2, 3):
-            a, ts = ages(f"{R}/bandwidth_limited_day4p2fix3_c500_{cfg}_run0{run}.csv")
+            a, ts = ages(f"{R}/bandwidth_limited_final_c500_{cfg}_run0{run}.csv")
             t0 = min(ts)
             buckets = {}
             for age, t in zip(a, ts):

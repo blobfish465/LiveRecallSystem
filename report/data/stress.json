@@ -11,9 +11,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 300,
    "connection_errors": 0,
-   "p50_ms": 15.720500000000001,
-   "p95_ms": 29.510050000000003,
-   "p99_ms": 33.937020000000004,
+   "p50_ms": 14.793,
+   "p95_ms": 26.182,
+   "p99_ms": 29.75511000000002,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 14700,
@@ -26,8 +26,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 44100,
-    "p50_ms": 15.720500000000001,
-    "p95_ms": 29.510050000000003,
+    "p50_ms": 14.793,
+    "p95_ms": 26.182,
     "fresh_pct": 100.0
    },
    "_file": "check_s300_run01.json"
@@ -43,9 +43,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 300,
    "connection_errors": 0,
-   "p50_ms": 18.245,
-   "p95_ms": 28.990100000000005,
-   "p99_ms": 32.095020000000005,
+   "p50_ms": 14.567499999999999,
+   "p95_ms": 26.215,
+   "p99_ms": 29.565010000000004,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 14700,
@@ -58,8 +58,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 44100,
-    "p50_ms": 18.245,
-    "p95_ms": 28.990100000000005,
+    "p50_ms": 14.567499999999999,
+    "p95_ms": 26.215,
     "fresh_pct": 100.0
    },
    "_file": "check_s300_run02.json"
@@ -75,9 +75,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 300,
    "connection_errors": 0,
-   "p50_ms": 18.38,
-   "p95_ms": 31.126050000000003,
-   "p99_ms": 37.10201,
+   "p50_ms": 14.593,
+   "p95_ms": 26.712300000000017,
+   "p99_ms": 30.70511000000002,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 14700,
@@ -90,8 +90,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 44100,
-    "p50_ms": 18.38,
-    "p95_ms": 31.126050000000003,
+    "p50_ms": 14.593,
+    "p95_ms": 26.712300000000017,
     "fresh_pct": 100.0
    },
    "_file": "check_s300_run03.json"
@@ -109,9 +109,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 26.111,
-   "p95_ms": 42.9761,
-   "p99_ms": 74.04113999999993,
+   "p50_ms": 19.891,
+   "p95_ms": 35.892150000000015,
+   "p99_ms": 111.28224999999986,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 24500,
@@ -124,8 +124,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 73500,
-    "p50_ms": 26.111,
-    "p95_ms": 42.9761,
+    "p50_ms": 19.891,
+    "p95_ms": 35.892150000000015,
     "fresh_pct": 100.0
    },
    "_file": "check_s500_run01.json"
@@ -141,9 +141,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 25.4155,
-   "p95_ms": 42.72705,
-   "p99_ms": 70.64205999999996,
+   "p50_ms": 19.686,
+   "p95_ms": 34.34520000000001,
+   "p99_ms": 90.09039999999979,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 24500,
@@ -156,8 +156,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 73500,
-    "p50_ms": 25.4155,
-    "p95_ms": 42.72705,
+    "p50_ms": 19.686,
+    "p95_ms": 34.34520000000001,
     "fresh_pct": 100.0
    },
    "_file": "check_s500_run02.json"
@@ -173,9 +173,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 24.816499999999998,
-   "p95_ms": 39.98625000000001,
-   "p99_ms": 47.936099999999946,
+   "p50_ms": 18.898,
+   "p95_ms": 32.64405,
+   "p99_ms": 36.45305999999997,
    "fresh_pct": 100.0,
    "fresh_final_pct": 100.0,
    "fresh_final_count": 24500,
@@ -188,8 +188,8 @@
    "normal_update_coverage_pct": 100.0,
    "normal_clients": {
     "messages": 73500,
-    "p50_ms": 24.816499999999998,
-    "p95_ms": 39.98625000000001,
+    "p50_ms": 18.898,
+    "p95_ms": 32.64405,
     "fresh_pct": 100.0
    },
    "_file": "check_s500_run03.json"
@@ -207,9 +207,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 25.389,
-   "p95_ms": 791.8462500000011,
-   "p99_ms": 7864.920729999999,
+   "p50_ms": 18.0965,
+   "p95_ms": 789.3896500000001,
+   "p99_ms": 7850.97083,
    "fresh_pct": 94.77825464949929,
    "fresh_final_pct": 90.0,
    "fresh_final_count": 22050,
@@ -222,14 +222,14 @@
    "normal_update_coverage_pct": 95.10204081632654,
    "normal_clients": {
     "messages": 66150,
-    "p50_ms": 24.555,
-    "p95_ms": 39.01055,
+    "p50_ms": 17.363,
+    "p95_ms": 31.348,
     "fresh_pct": 100.0
    },
    "slow_clients": {
     "messages": 3750,
-    "p50_ms": 4845.5785,
-    "p95_ms": 9122.2322,
+    "p50_ms": 4832.3435,
+    "p95_ms": 9113.47375,
     "fresh_pct": 2.6666666666666665
    },
    "_file": "check_s500slow_run01.json"
@@ -245,9 +245,9 @@
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 24.432,
-   "p95_ms": 771.5786,
-   "p99_ms": 7831.79148,
+   "p50_ms": 18.27,
+   "p95_ms": 876.5082,
+   "p99_ms": 7950.825679999999,
    "fresh_pct": 94.77825464949929,
    "fresh_final_pct": 90.0,
    "fresh_final_count": 22050,
@@ -260,53 +260,53 @@
    "normal_update_coverage_pct": 95.10204081632654,
    "normal_clients": {
     "messages": 66150,
-    "p50_ms": 23.5415,
-    "p95_ms": 39.14720000000001,
+    "p50_ms": 17.5965,
+    "p95_ms": 34.333400000000026,
     "fresh_pct": 100.0
    },
    "slow_clients": {
     "messages": 3750,
-    "p50_ms": 4809.618,
-    "p95_ms": 9094.6304,
+    "p50_ms": 4906.746999999999,
+    "p95_ms": 9111.71775,
     "fresh_pct": 2.6666666666666665
    },
    "_file": "check_s500slow_run02.json"
   },
   {
    "clients": 500,
-   "live_caption_messages": 69904,
+   "live_caption_messages": 69900,
    "recovered_history_items": 0,
-   "accepted": 69904,
+   "accepted": 69900,
    "recovered": 0,
    "duplicates": 0,
    "stale": 0,
    "invalid_history_nonfinal": 0,
    "connections": 500,
    "connection_errors": 0,
-   "p50_ms": 24.6465,
-   "p95_ms": 766.5200000000003,
-   "p99_ms": 7849.61764,
-   "fresh_pct": 94.77283131151293,
+   "p50_ms": 18.045,
+   "p95_ms": 834.8326500000002,
+   "p99_ms": 7869.6098999999995,
+   "fresh_pct": 94.77825464949929,
    "fresh_final_pct": 90.0,
    "fresh_final_count": 22050,
    "fresh_final_denominator": 24500,
    "unique_finals": 24500,
    "expected_finals_total": 24500,
    "final_completeness_pct": 100.0,
-   "unique_live_revisions": 69904,
+   "unique_live_revisions": 69900,
    "expected_updates_total": 73500,
-   "normal_update_coverage_pct": 95.10748299319728,
+   "normal_update_coverage_pct": 95.10204081632654,
    "normal_clients": {
     "messages": 66150,
-    "p50_ms": 23.8525,
-    "p95_ms": 38.887550000000005,
+    "p50_ms": 17.416,
+    "p95_ms": 30.947550000000003,
     "fresh_pct": 100.0
    },
    "slow_clients": {
-    "messages": 3754,
-    "p50_ms": 4843.2625,
-    "p95_ms": 9127.01915,
-    "fresh_pct": 2.6638252530633992
+    "messages": 3750,
+    "p50_ms": 4846.4400000000005,
+    "p95_ms": 9125.06075,
+    "fresh_pct": 2.6666666666666665
    },
    "_file": "check_s500slow_run03.json"
   }
